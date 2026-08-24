@@ -219,7 +219,7 @@ dsh plugin --profile web add <插件仓库路径>
 不建议。插件依赖"独占会话"语义，回退期间会话会被短暂 detach；多个实例并发操作可能引起冲突。
 
 **Q7：历史数据存在哪里？**
-`$DSH_HOME/.dsh-history/`：`repos/`（会话影子仓库）、`repos-ws/`（工作区影子仓库）、`backups/`（回退前备份）。
+`$DSH_HOME/.dsh-history-rewind/`：`repos/`（会话影子仓库）、`repos-ws/`（工作区影子仓库）、`backups/`（回退前备份）。
 
 ---
 

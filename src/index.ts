@@ -1,5 +1,5 @@
 /**
- * Node half of @deepseek-ai/dsh-history: the shadow-store engine plus a
+ * Node half of @deepseek-ai/dsh-history-rewind: the shadow-store engine plus a
  * loopback-gated HTTP channel the browser talks to.
  *
  *  - Snapshot: on every turn/start and turn/end (and on manual demand) the
@@ -17,7 +17,7 @@
  *
  * No new session is ever created; no event is hydrated; the process never
  * restarts; nothing but git carries state.
- * @module @deepseek-ai/dsh-history
+ * @module @deepseek-ai/dsh-history-rewind
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -366,7 +366,7 @@ export function apply(ctx: Context): void {
   if (webServer === undefined) return
   ctx.effect(
     () => webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: buildHandler(engine, gate) }),
-    'dsh-history: snapshot + rewind + timeline routes',
+    'dsh-history-rewind: snapshot + rewind + timeline routes',
   )
 
   // /history command: opens the history panel in the browser. The handler
@@ -389,6 +389,6 @@ export function apply(ctx: Context): void {
         // to the browser, where the /history row mounts and opens the panel.
         return { kind: 'success', text: 'History panel opened.' }
       },
-    }), 'dsh-history: /history command')
+    }), 'dsh-history-rewind: /history command')
   }
 }

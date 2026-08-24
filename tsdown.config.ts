@@ -1,5 +1,5 @@
 /**
- * tsdown config for @deepseek-ai/dsh-history (standalone mirror of the
+ * tsdown config for @deepseek-ai/dsh-history-rewind (standalone mirror of the
  * official packages/client/tsdown.client.ts preset).
  *
  * Node half: ESM bundles of src/index.ts + src/invariant.ts into lib/.
@@ -8,7 +8,7 @@
  */
 import { defineConfig, type UserConfig } from 'tsdown'
 
-const ID = '@deepseek-ai/dsh-history'
+const ID = '@deepseek-ai/dsh-history-rewind'
 
 /** Shell module-table specifiers the client bundle must NOT inline. */
 const CLIENT_EXTERNALS: readonly string[] = [

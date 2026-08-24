@@ -1,9 +1,9 @@
 /**
- * Browser half of @deepseek-ai/dsh-history: a flat, Trajectory/DevTools-inspired
+ * Browser half of @deepseek-ai/dsh-history-rewind: a flat, Trajectory/DevTools-inspired
  * timeline panel that renders the session's git graph, lists commits concisely,
  * takes manual snapshots, and rewinds in place via the Host channel.
  *
- * @module @deepseek-ai/dsh-history/client
+ * @module @deepseek-ai/dsh-history-rewind/client
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -851,5 +851,5 @@ export function apply(ctx: Context): void {
   ctx.effect(() => () => {
     root.unmount()
     host.remove()
-  }, 'dsh-history: floating history panel')
+  }, 'dsh-history-rewind: floating history panel')
 }

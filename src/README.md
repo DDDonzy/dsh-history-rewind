@@ -1,6 +1,6 @@
-# @deepseek-ai/dsh-history
+# @deepseek-ai/dsh-history-rewind
 
-> **项目名（GitHub 仓库）：`dsh-history-rewind`**。上方 `@deepseek-ai/dsh-history` 为 npm/插件包名与 DSH 加载标识（不可更改，profile 依赖此名）。
+> **项目名（GitHub 仓库）：`dsh-history-rewind`**，包名同步为 `@deepseek-ai/dsh-history-rewind`（DSH 加载标识与 profile 依赖此名）。
 
 > ⚠️ **重要声明**：本项目为**个人使用而开发**，仅按作者自身工作流演进。**后续仅修复严重 Bug，一般不接受新功能请求，也不承诺常规更新、维护或兼容性保证。** 使用前请知悉并自行评估风险。
 
@@ -104,7 +104,7 @@
 ## 仓库布局
 
 ```
-$DSH_HOME/.dsh-history/
+$DSH_HOME/.dsh-history-rewind/
 ├── repos/session-<uuid>.git      # 会话仓库（bare，纯 plumbing 快照）
 │                                 #   快照：hash → 与 base 比对（相同跳过）
 │                                 #   → commit-tree（父 = base）→ 推进 ref
@@ -200,8 +200,8 @@ profile 补丁行（`inject` 声明行级服务依赖）：
 
 ```yaml
 - insert:
-    - id: dsh-history
-      name: '@deepseek-ai/dsh-history'
+    - id: dsh-history-rewind
+      name: '@deepseek-ai/dsh-history-rewind'
       inject: [subprocess, sessions, webServer, sessionPersistence, agents]
 ```
 
@@ -251,7 +251,7 @@ pnpm test             # 单元 + 真实 git 集成测试（temp 目录）
 
 ## HTTP API
 
-Host 端在 `/dsh-history/api` 前缀下提供（loopback 白名单）：
+Host 端在 `/dsh-history-rewind/api` 前缀下提供（loopback 白名单）：
 
 | 路由 | 方法 | 参数 | 说明 |
 |---|---|---|---|

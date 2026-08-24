@@ -1,12 +1,12 @@
 /**
- * Shared constants and plain data types for @deepseek-ai/dsh-history.
+ * Shared constants and plain data types for @deepseek-ai/dsh-history-rewind.
  */
 
 /** HTTP route prefix served by the Host half for the browser channel. */
-export const ROUTE_PREFIX = '/dsh-history/api'
+export const ROUTE_PREFIX = '/dsh-history-rewind/api'
 
 /** Root directory (under $DSH_HOME) holding every shadow-store artifact. */
-export const HISTORY_ROOT_DIRNAME = '.dsh-history'
+export const HISTORY_ROOT_DIRNAME = '.dsh-history-rewind'
 
 /** Directory holding per-session bare repos (`repos/session-<id>.git`). */
 export const REPOS_DIRNAME = 'repos'
