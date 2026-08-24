@@ -412,6 +412,25 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
   const [notice, setNotice] = useState<string>('')
   /** Row currently hovered (sha), for ancestor-path highlight. */
   const [hoverSha, setHoverSha] = useState<string | null>(null)
+  /** 500ms hover-delay timer: the graph only switches to the hovered path
+   *  after the pointer rests on a row; leaving restores the current style
+   *  immediately (the graph stays on HEAD unless the user wants to switch). */
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const onHover = (sha: string | null): void => {
+    if (hoverTimer.current !== null) {
+      clearTimeout(hoverTimer.current)
+      hoverTimer.current = null
+    }
+    if (sha === null) {
+      // Pointer left: restore the current graph instantly.
+      setHoverSha(null)
+      return
+    }
+    hoverTimer.current = setTimeout(() => {
+      hoverTimer.current = null
+      setHoverSha(sha)
+    }, 500)
+  }
 
   const load = async (): Promise<void> => {
     const [result, status] = await Promise.all([
@@ -423,6 +442,13 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
     if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
   }
   useEffect(() => { void load() }, [sessionId])
+  useEffect(() => () => {
+    // Clear any pending hover-delay timer on unmount.
+    if (hoverTimer.current !== null) {
+      clearTimeout(hoverTimer.current)
+      hoverTimer.current = null
+    }
+  }, [])
 
   const graph = useMemo(() => (rows === undefined || rows === null ? null : buildGraph(rows, head)), [rows, head])
   const headSha = head
@@ -593,7 +619,7 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
           isHovered: hoverSha === row.sha,
           isSelected: selected?.sha === row.sha,
           hoverPath,
-          onHover: (sha) => setHoverSha(sha),
+          onHover,
           onSelect: (target) => {
             if (selected?.sha === target.sha) {
               setSelected(null)
