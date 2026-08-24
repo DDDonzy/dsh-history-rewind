@@ -1,5 +1,7 @@
 # @deepseek-ai/dsh-history
 
+> **项目名（GitHub 仓库）：`dsh-history-rewind`**。上方 `@deepseek-ai/dsh-history` 为 npm/插件包名与 DSH 加载标识（不可更改，profile 依赖此名）。
+
 > ⚠️ **重要声明**：本项目为**个人使用而开发**，仅按作者自身工作流演进。**后续仅修复严重 Bug，一般不接受新功能请求，也不承诺常规更新、维护或兼容性保证。** 使用前请知悉并自行评估风险。
 
 为 DeepSeek Harness (dsh) 打造的**非线性会话历史插件**：任意 TURN 状态可快照、可回退（同会话 id 原地热重载），以 **git 影子仓库**为唯一事实源。
@@ -207,14 +209,14 @@ profile 补丁行（`inject` 声明行级服务依赖）：
 
 ```bash
 # 一次性创建（已存在则跳过）：
-mkdir $DSH_HOME/profiles/dsh-history-dev
+mkdir $DSH_HOME/profiles/dsh-history-rewind-dev
 #   package.json: dsh.profile.bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
 #   cordis.patch.yml: 上面 insert 行
 #   pnpm-workspace.yaml: packages: [.] + nodeLinker: hoisted + autoInstallPeers: false
-pnpm --dir $DSH_HOME/profiles/dsh-history-dev add <本仓>
+pnpm --dir $DSH_HOME/profiles/dsh-history-rewind-dev add <本仓>
 
 # 启动（端口 3082，绝不动主实例 3080）：
-DSH_PERMISSION_MODE=danger-full-access dsh --profile dsh-history-dev --port 3082 --no-open
+DSH_PERMISSION_MODE=danger-full-access dsh --profile dsh-history-rewind-dev --port 3082 --no-open
 ```
 
 ---
