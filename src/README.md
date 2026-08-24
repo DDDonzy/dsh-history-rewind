@@ -24,6 +24,7 @@
 - [HTTP API](#http-api)
 - [`/history` 命令](#history-命令)
 - [项目目录结构](#项目目录结构)
+- [回退后的缓存契约（不会重建缓存）](#回退后的缓存契约不会重建缓存)
 - [已知语义与边界](#已知语义与边界)
 - [Model Experience](#model-experience)
 - [许可证](#许可证)
@@ -302,6 +303,37 @@ E:\dsh-history\
 ├── pnpm-lock.yaml
 └── README.md
 ```
+
+---
+
+## 回退后的缓存契约（不会重建缓存）
+
+**问题**：DeepSeek / Anthropic 前缀缓存（KV cache）命中要求新请求前缀与已持久化单元**逐字节一致**。dsh 的 resume 会重建请求信封（system prompt + tools + route）；回退后如果直接裸 resume，重建的前缀与回退前历史在第一个字节就分叉——此后缓存永远无法命中，首轮响应退化。
+
+**修复**（`rewind.ts` 步骤 7）：从目标文件字节解码两件事，然后按"组合改进 → 裸回退"顺序尝试 resume：
+
+```ts
+facts = decodeTargetFacts(目标字节):
+  agentPreset  ← 目标 head 的 session 头字段；若有 `agent-preset/selected` 事件则后者胜出
+  route        ← 目标最后一条 `request/header` 的 config（provider/model）
+
+tries[0] = agents.resume({
+  resumeSessionId,
+  agentOptions: { provider, model },          // 路由与目标一致
+  setup: async (agentCtx) => agentPresets.mount(agentCtx, facts.agentPreset),  // 重新挂载 preset
+})
+tries[1] = agents.resume({ resumeSessionId, agentOptions: { provider, model } })  // 降级
+```
+
+- tries[0] 成功 → 无告警，**缓存契约成立**：工具集（32 个）与系统提示段（与初始逐字节一致）恢复，路由恢复，消息前缀来自替换后的文件（字节级一致）——三段吻合，首轮 `cacheRead > 0`，后续轮次继续追加命中；
+- tries[0] 失败、tries[1] 成功 → `compositionWarning`：会话可用但缓存退化；
+- 两者都失败 → detached（resume-failed）。
+
+**边界**：
+- 目标无 preset 记录 → 只恢复路由（无警告）；
+- 目标文件损坏 → decode 失败为空 facts → 裸 resume（不失败，仅缓存退化）；
+- preset 已删除 → 降级 + `compositionWarning`；
+- 工作区指令（AGENTS.md 等）变化同样改变 system prompt 前缀——"会话和工作区"一起回退时按目标时间对齐，指令一致；只回退会话时若指令文件已与目标不同，分叉属预期。
 
 ---
 
