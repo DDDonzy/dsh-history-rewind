@@ -778,7 +778,7 @@ function HistoryPanel(props: {
   }
   if (rows.length === 0) {
     return createElement('div', { className: PANEL, style: { padding: 32, alignItems: 'center', justifyContent: 'center', gap: 12 } },
-      createElement('div', { style: { color: 'var(--dsw-alias-label-secondary, #888)', textAlign: 'center', maxWidth: 360, lineHeight: 1.5, fontSize: 12 } },
+      createElement('div', { style: { color: 'var(--dsw-alias-label-secondary, #888)', textAlign: 'center', maxWidth: 560, lineHeight: 1.5, fontSize: 12 } },
         '当前会话尚未产生快照。发送消息后，TURN 开始与结束将自动记录。',
       ),
     )
