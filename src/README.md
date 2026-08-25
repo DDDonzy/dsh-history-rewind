@@ -195,7 +195,7 @@ $DSH_HOME/.dsh-history-rewind/
   零空页面闪烁，零二次跳跃）。
 ```
 
-**工作区回退链路**：解析目标 commit 的 `ws=` 配对 → 备份当前工作区 → `read-tree` + `checkout-index`（临时 index，git 直接写文件，二进制安全）恢复。**不做 `git clean`**（新增文件保留，避免误删）。
+**工作区回退链路**：解析目标 commit 的 `ws=` 配对 → 备份当前工作区 → `materializeTreeExact` 精确恢复（`read-tree` + `checkout-index -a -f` 写回目标文件；随后按**与快照 walk 完全相同的排除规则**遍历工作区，删除「目标树中不存在的 in-scope 文件」并修剪空目录）。结果与快照**逐文件一致，不多不少**。排除项（`.git` / `node_modules` / `dist` …）从不进入遍历，绝不误删；跳转前已整目录备份到 `backups/`，删除可恢复。
 
 **三种模式**：
 - **仅会话**：只回退会话消息（热重载）；
@@ -366,7 +366,7 @@ tries[1] = agents.resume({ resumeSessionId, agentOptions: { provider, model } })
 - **回退后的缓存契约**：跳转时从目标文件恢复 agent preset（重新 mount，恢复工具集/系统提示）与 provider/model 路由——保证前缀缓存（KV cache）可继续命中；preset 挂载失败时降级为裸 resume 并提示 `compositionWarning`；
 - **崩溃语义**：resume 前/后崩溃 → 磁盘 = 目标内容 + git 原样（从未因跳转写入）；进程重启后跳转目标丢失 → 快照沿现有路提交，git 自洽；
 - **turn 计数**：从 base 路推导（跳回 C2 后下一轮 = C2 的 turn+1）；
-- **工作区恢复不做 `git clean`**：新增文件保留（避免误删）；
+- **工作区精确恢复**：恢复后工作区与快照逐文件一致（多余的 in-scope 文件会被删除、空目录会被修剪）；排除目录（`.git`/`node_modules`/`dist` 等）不受影响，且跳转前整目录已备份；
 - **多会话共享同一 cwd**：工作区回退影响该 cwd 下所有会话（文档化语义）；
 - **重复实例警告**：只有单个 dsh 实例的会话仓库是安全的（回退期间 detach 后窗口极小）；不要对同一会话在多个实例并发操作。
 

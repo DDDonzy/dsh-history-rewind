@@ -35,8 +35,8 @@ import {
   argvRevParseCommit, argvLogSubjects, commitEnv, type ShadowRepo,
 } from './git-commands.ts'
 import { parseMessage } from './messages.ts'
-import { sessionRepoDir, workspaceRepoDir, legacyWorkspaceRepoDir, sessionBackupDir, ensureBareRepo, ensureHistoryRoot } from './store.ts'
-import { materializeTree, backupWorkspace } from './workspace.ts'
+import { sessionRepoDir, workspaceRepoDir, legacyWorkspaceRepoDir, sessionBackupDir, ensureBareRepo, ensureHistoryRoot, readExcludes } from './store.ts'
+import { materializeTree, materializeTreeExact, backupWorkspace } from './workspace.ts'
 import { setJumpTarget } from './state.ts'
 import { decodeTargetFacts, seedBlankSession } from './zstd-util.ts'
 import type { SessionLike, PersistenceLike } from './snapshot.ts'
@@ -213,7 +213,10 @@ export async function rewindSession(
     }
     const backed = await backupWorkspace(root, sessionId, cwdWs)
     if (backed === null) return { ok: false, reason: 'workspace-backup-failed' }
-    const restored = await materializeTree(subprocess, wsGit, wsCommit, cwdWs)
+    // Exact restore: same exclude rules as the snapshot walk, so the workspace
+    // ends up byte-identical to the snapshot — extra files are removed too.
+    const excludes = await readExcludes(root, cwdWs)
+    const restored = await materializeTreeExact(subprocess, wsGit, wsCommit, cwdWs, excludes)
     return {
       ok: restored !== null,
       target,
@@ -284,7 +287,11 @@ export async function rewindSession(
         backup.workspace = backed
         // Restore now (session still live): only the atomic session-file
         // rename and the resume remain inside the dispose → resume gap.
-        const restored = await materializeTree(subprocess, wsGit, wsCommit, cwd)
+        // Exact restore: same exclude rules as the snapshot walk, so the
+        // workspace becomes byte-identical to the snapshot (extra files that
+        // did not exist at that snapshot are removed too — nothing more, nothing less).
+        const excludes = await readExcludes(root, cwd)
+        const restored = await materializeTreeExact(subprocess, wsGit, wsCommit, cwd, excludes)
         workspaceRestored = restored !== null
       } else {
         wsCommit = null

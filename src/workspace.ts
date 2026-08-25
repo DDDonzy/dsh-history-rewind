@@ -15,7 +15,7 @@
  * deleted afterwards, so the repo stays work-tree-less.
  */
 
-import { readdir, lstat, cp, unlink } from 'node:fs/promises'
+import { readdir, lstat, cp, unlink, rmdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, sep, basename, relative, resolve } from 'node:path'
 import type { SubprocessLike } from './git-runner.ts'
@@ -331,6 +331,101 @@ export async function materializeTree(
     try { await unlink(env.GIT_INDEX_FILE!) } catch { /* transient index already gone */ }
   }
   return count
+}
+
+/**
+ * Restore one tree into a LIVE workspace so the result matches the snapshot
+ * EXACTLY — nothing more, nothing less. It first materializes the target files
+ * (checkout-index -a -f, same as {@link materializeTree}), then deletes every
+ * in-scope working-tree file the target tree does NOT contain, and prunes the
+ * directories left empty by those deletions.
+ *
+ * "In-scope" uses the SAME exclude rules as snapshotting (`.git`, `node_modules`,
+ * `dist`, … and the repo's info/exclude), so excluded paths are never walked and
+ * never deleted. The whole operation is guarded upstream by a full pre-rewind
+ * backup of the workspace, so the delete step is always recoverable.
+ *
+ * @param subprocess - the subprocess service.
+ * @param repoDir - the bare workspace shadow repo dir holding the tree.
+ * @param treeish - commit or tree to restore.
+ * @param targetDir - the live workspace root to make identical to the tree.
+ * @param excludes - exclude patterns (identical to the snapshot walk's set).
+ * @returns the number of files in the target tree, or null on failure.
+ */
+export async function materializeTreeExact(
+  subprocess: SubprocessLike,
+  repoDir: string,
+  treeish: string,
+  targetDir: string,
+  excludes: readonly string[],
+): Promise<number | null> {
+  const repo: ShadowRepo = { gitDir: repoDir }
+  const listed = await runGit(subprocess, argvListTree(repo, treeish), repoDir, commitEnv())
+  if (listed.exitCode !== 0) return null
+  // ls-tree -r -z lines: "<mode> <type> <sha>\t<path>" — take the path after the tab.
+  const keep = new Set<string>()
+  for (const entry of listed.stdout.split('\x00')) {
+    if (entry.length === 0) continue
+    const tab = entry.indexOf('\t')
+    if (tab < 0) continue
+    keep.add(entry.slice(tab + 1))
+  }
+
+  // 1. Write the target files into the workspace (force-overwrites existing).
+  const restored = await materializeTree(subprocess, repoDir, treeish, targetDir)
+  if (restored === null) return null
+
+  // 2. Delete every in-scope file the target does not contain, using the same
+  //    exclude matcher as the snapshot walk (excluded dirs are never entered).
+  const matcher = compileExcludes(excludes)
+  const present = await walkFiles(targetDir, matcher)
+  for (const file of present) {
+    if (keep.has(file.rel)) continue
+    try { await unlink(file.abs) } catch { /* already gone or locked; best-effort */ }
+  }
+
+  // 3. Prune directories left empty by the deletions (bottom-up; never touch
+  //    excluded dirs or .git, which the walk already skips).
+  await pruneEmptyDirs(targetDir, matcher)
+  return keep.size
+}
+
+/**
+ * Remove now-empty directories under `rootDir` bottom-up. Excluded directories
+ * and `.git` are skipped entirely (never entered, never removed); `rootDir`
+ * itself is preserved. A directory that becomes empty only after its empty
+ * children are removed is removed too.
+ * @param rootDir - the workspace root (kept).
+ * @param matcher - the same exclude matcher used by the snapshot walk.
+ * @returns whether `rootDir` holds no in-scope entries after pruning.
+ */
+async function pruneEmptyDirs(
+  rootDir: string,
+  matcher: (rel: string, isDir: boolean) => boolean,
+): Promise<boolean> {
+  const walk = async (absDir: string, relDir: string): Promise<boolean> => {
+    const entries = await readdir(absDir, { withFileTypes: true }).catch(() => null)
+    if (entries === null) return false
+    let empty = true
+    for (const entry of entries) {
+      const name = entry.name
+      const rel = relDir.length === 0 ? name : `${relDir}/${name}`
+      if (entry.isDirectory()) {
+        if (name === GIT_DIR_NAME || matcher(rel, true)) { empty = false; continue }
+        const childEmpty = await walk(join(absDir, name), rel)
+        if (childEmpty) {
+          try { await rmdir(join(absDir, name)) } catch { empty = false }
+        } else {
+          empty = false
+        }
+      } else {
+        // Any surviving file keeps the directory alive.
+        empty = false
+      }
+    }
+    return empty
+  }
+  return walk(rootDir, '')
 }
 
 /**
