@@ -9,9 +9,13 @@
                     "./invariant":  "./lib/invariant.js",
                     "./client":  "./lib/client.js",
                     "./src/*":  "./src/*",
+                    "./cordis.patch.yml":  "./cordis.patch.yml",
                     "./package.json":  "./package.json"
                 },
     "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
                 "client":  {
                                "platform":  "web"
                            }
@@ -20,7 +24,8 @@
     "files":  [
                   "lib/index.js",
                   "lib/invariant.js",
-                  "lib/client.js"
+                  "lib/client.js",
+                  "cordis.patch.yml"
               ],
     "scripts":  {
                     "build":  "tsdown",
