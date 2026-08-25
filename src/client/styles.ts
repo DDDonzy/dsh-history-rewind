@@ -365,6 +365,15 @@ export const STYLES = [
   '  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.08));',
   '  white-space: nowrap;',
   '}',
+  '/* TURN rows: the changed-file line indents to the message TEXT column so it',
+  '   aligns with the USER/ASST content (not with the role badges). The spacer',
+  '   reuses the badge font so 4ch measures exactly the USER/ASST label width,',
+  '   plus the badge padding (2x4px) and the 6px item gap. */',
+  '.dsh-history-file-indent {',
+  '  flex: none;',
+  '  width: calc(4ch + 14px);',
+  '  font: 600 10px/14px var(--ds-font-family-code, monospace);',
+  '}',
   '/* Single-line file clip (BASELINE rows): clips any overflow instead of',
   '   wrapping, and lets each chip shrink+ellipsis so the trailing "+N" stays.',
   '   Keeps the whole row on exactly one line. */',
@@ -718,6 +727,7 @@ export const SINGLE_TEXT = 'dsh-history-single-text'
 export const FILE_LIST = 'dsh-history-file-list'
 export const FILE_CHIP = 'dsh-history-file-chip'
 export const FILE_CLIP = 'dsh-history-file-clip'
+export const FILE_INDENT = 'dsh-history-file-indent'
 export const BUTTON = 'dsh-history-button'
 export const ACTION_DOCK = 'dsh-history-action-dock'
 export const ACTION_INFO = 'dsh-history-action-info'

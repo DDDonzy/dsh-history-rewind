@@ -33,6 +33,7 @@ import {
   FILE_LIST,
   FILE_CHIP,
   FILE_CLIP,
+  FILE_INDENT,
   DIALOG,
   DIALOG_HEAD,
   DIALOG_TITLE,
@@ -188,11 +189,14 @@ function timeOf(ct: number): string {
 const MAX_FILES = 12
 
 /** Render a changed-file chip line: at most MAX_FILES chips + "+N" indicator,
- *  kept on a single line by clipping overflow (BASELINE & TURN rows). */
-function FileChips(props: { files: string[] }): ReactNode {
-  const { files } = props
+ *  kept on a single line by clipping overflow (BASELINE & TURN rows).
+ *  With `indent` (TURN rows) a leading spacer shifts the chips to the message
+ *  TEXT column — the line aligns with the USER/ASST content, not the badges. */
+function FileChips(props: { files: string[]; indent?: boolean }): ReactNode {
+  const { files, indent = false } = props
   if (files.length === 0) return null
   return createElement('div', { className: FILE_LIST },
+    ...(indent ? [createElement('span', { className: FILE_INDENT }, null)] : []),
     createElement('div', { className: FILE_CLIP },
       files.slice(0, MAX_FILES).map((file) =>
         createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
@@ -280,7 +284,9 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean }): ReactNode {
           createElement('span', { className: MSG_TEXT, title: meta?.asstMessage ?? meta?.message ?? '' }, meta?.asstMessage ?? meta?.message ?? '—'),
         ),
       ),
-      createElement(FileChips, { files }),
+      // Indented chips: align with the message TEXT column (under USER's
+      // reply text) rather than with the USER/ASST role badges.
+      createElement(FileChips, { files, indent: true }),
     ),
     sideElements,
   )

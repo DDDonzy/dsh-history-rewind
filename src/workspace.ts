@@ -298,6 +298,44 @@ export async function snapshotWorkspace(
 }
 
 /**
+ * List the file paths (forward slashes, tree-relative) under one bare-repo
+ * tree. Used to know exactly which files a restore wrote, so the fs
+ * observation state can be warmed for them.
+ * @param subprocess - the subprocess service.
+ * @param repoDir - the bare repo dir.
+ * @param treeish - commit or tree to list.
+ * @returns the relative path list, or null on failure.
+ */
+export async function treeFileList(
+  subprocess: SubprocessLike,
+  repoDir: string,
+  treeish: string,
+): Promise<string[] | null> {
+  const repo: ShadowRepo = { gitDir: repoDir }
+  const listed = await runGit(subprocess, argvListTree(repo, treeish), repoDir, commitEnv())
+  if (listed.exitCode !== 0) return null
+  const paths: string[] = []
+  for (const entry of listed.stdout.split('\x00')) {
+    if (entry.length === 0) continue
+    const tab = entry.indexOf('\t')
+    if (tab >= 0) paths.push(entry.slice(tab + 1))
+  }
+  return paths
+}
+
+/**
+ * List the live workspace's in-scope files (same exclude rules as snapshots).
+ * @param cwd - the workspace root.
+ * @param excludes - exclude patterns (identical to the snapshot walk's set).
+ * @returns workspace-relative paths (forward slashes).
+ */
+export async function workspaceFileList(cwd: string, excludes: readonly string[]): Promise<string[]> {
+  const matcher = compileExcludes(excludes)
+  const files = await walkFiles(cwd, matcher)
+  return files.map((file) => file.rel)
+}
+
+/**
  * Materialize one tree (from a bare repo) into a target directory using a
  * transient index; git writes the files itself (binary-safe). The index file
  * lives inside the repo dir and is removed afterwards.

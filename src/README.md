@@ -193,6 +193,16 @@ $DSH_HOME/.dsh-history-rewind/
   「正在回退 / 正在刷新会话」+ 目标 commit），成功变 ✓ 后 0.4s 平滑上浮淡出
   揭示已切换好的会话内容（`done → fading → idle`，全程会话区保持在对话视图上，
   零空页面闪烁，零二次跳跃）。
+
+**fs 观察状态热修复（warmFsObservation）**：跳转会 detach + resume 会话，
+agent 随之重生——DSH 的「先读后改」观察策略（`dsh-fs-observation-policy`）
+以 agent session 为键，因此每次跳转后新 agent 的观察表为空，下一次 `edit`
+必然报 `FS_NOT_OBSERVED`（"edit requires reading ... first"）。本插件在
+resume 成功后按同一通道重放 `fs/observed`（provider `resolve`+`stat` 取权威
+version，actor 携带新 agent），让跳转后的首次编辑直接通过。恢复的工作区用
+目标树文件清单（精确恢复后的全集）；未恢复工作区的跳转用当前 in-scope
+遍历清单；仅工作区恢复对活 agent 的**已变更文件**做热修复（旧观察版本已过期，
+否则报 `FS_STALE_VERSION`）。
 ```
 
 **工作区回退链路**：解析目标 commit 的 `ws=` 配对 → 备份当前工作区 → `materializeTreeExact` 精确恢复（`read-tree` + `checkout-index -a -f` 写回目标文件；随后按**与快照 walk 完全相同的排除规则**遍历工作区，删除「目标树中不存在的 in-scope 文件」并修剪空目录）。结果与快照**逐文件一致，不多不少**。排除项（`.git` / `node_modules` / `dist` …）从不进入遍历，绝不误删；跳转前已整目录备份到 `backups/`，删除可恢复。

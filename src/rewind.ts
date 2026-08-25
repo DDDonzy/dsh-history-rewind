@@ -36,7 +36,7 @@ import {
 } from './git-commands.ts'
 import { parseMessage } from './messages.ts'
 import { sessionRepoDir, workspaceRepoDir, legacyWorkspaceRepoDir, sessionBackupDir, ensureBareRepo, ensureHistoryRoot, readExcludes } from './store.ts'
-import { materializeTree, materializeTreeExact, backupWorkspace, snapshotWorkspace } from './workspace.ts'
+import { materializeTree, materializeTreeExact, backupWorkspace, snapshotWorkspace, treeFileList, workspaceFileList } from './workspace.ts'
 import { setJumpTarget } from './state.ts'
 import { decodeTargetFacts, seedBlankSession } from './zstd-util.ts'
 import type { SessionLike, PersistenceLike } from './snapshot.ts'
@@ -159,6 +159,57 @@ async function wsRepoWithCommit(
 }
 
 /**
+ * Re-observe files through DSH's fs-observation policy after a jump.
+ *
+ * The rewind detaches + resumes the session, which reborn the AGENT. The
+ * policy's "read the file before you edit it" state is keyed by the agent's
+ * session object, so after EVERY jump the new agent starts with nothing
+ * observed — the first `edit` would fail with `FS_NOT_OBSERVED`
+ * ("edit requires reading ... first") until the model re-reads the file.
+ *
+ * Warming replays the same `fs/observed` event the read tool emits (same
+ * provider resolve + stat → authoritative version), so the next edit's CAS
+ * matches the on-disk state and succeeds directly.
+ *
+ * @param agentCtx - the agent context that carries `agent` (resumed or live).
+ * @param files - workspace-relative paths (forward slashes) to observe.
+ */
+async function warmFsObservation(agentCtx: unknown, files: readonly string[]): Promise<void> {
+  const agent = (agentCtx as { agent?: unknown } | undefined)?.agent
+  const session = (agent as { session?: { header?: { cwd?: string } } } | undefined)?.session
+  const cwd = session?.header?.cwd
+  const fs = (agentCtx as { get?: (name: string) => unknown } | undefined)?.get?.('fs') as
+    | {
+        resolve?(path: string, options?: { cwd?: string }): Promise<unknown>
+        stat?(target: unknown): Promise<{ version?: unknown } | undefined>
+      }
+    | undefined
+  const emit = (agentCtx as { emit?: (event: string, ...args: unknown[]) => void } | undefined)?.emit
+  if (agent === undefined || cwd === undefined || cwd.length === 0 || fs === undefined || typeof emit !== 'function') return
+  for (const rel of files) {
+    try {
+      const target = await fs.resolve!(rel, { cwd })
+      const info = await fs.stat!(target)
+      if (target !== undefined && info !== undefined && info.version !== undefined) {
+        emit('fs/observed', target, { kind: 'present' as const, version: info.version }, { agent })
+      }
+    } catch {
+      // Best-effort: an unresolvable file stays unobserved (one model read).
+    }
+  }
+}
+
+/** Current workspace in-scope file list under the same snapshot excludes. */
+async function currentWorkspaceFiles(root: string, cwd: string): Promise<string[]> {
+  try {
+    const excludes = await readExcludes(root, cwd)
+    return await workspaceFileList(cwd, excludes)
+  } catch {
+    return []
+  }
+}
+
+/**
  * Perform one rewind (checkout-only). Single-flight per session (callers gate it).
  * @param subprocess - the subprocess service.
  * @param root - history root.
@@ -221,6 +272,16 @@ export async function rewindSession(
     // "did the code change?" gate compares against THIS (post-jump) tree — else
     // the restore itself reads as a change and spawns a spurious BASELINE.
     if (restored !== null) await snapshotWorkspace(subprocess, root, sessionId, cwdWs, 'dsh-history: re-anchor after workspace rewind').catch(() => undefined)
+    // The restore changed on-disk versions; re-observe the restored files in the
+    // LIVE agent so its next edit does not hit FS_STALE_VERSION. The session was
+    // not resumed here, so the agent (and its observation state) is unchanged.
+    if (restored !== null) {
+      const files = (await treeFileList(subprocess, wsGit, wsCommit)) ?? []
+      const liveAgent = agents?.get(sessionId) as ({ ctx?: unknown } & AgentLike) | undefined
+      if (liveAgent !== undefined && liveAgent.ctx !== undefined && files.length > 0) {
+        await warmFsObservation(liveAgent.ctx, files)
+      }
+    }
     return {
       ok: restored !== null,
       target,
@@ -276,6 +337,8 @@ export async function rewindSession(
   const cwd = session.header.cwd
   let noWorkspaceSnapshot = false
   let workspaceRestored = false
+  /** Files to re-observe through the fs-observation policy after resume. */
+  let warmFiles: string[] = []
   if (restoreWorkspace && cwd !== undefined && cwd.length > 0) {
     wsCommit = await resolveWorkspaceCommit(subprocess, sessionRepo, target, root)
     if (wsCommit === null) {
@@ -301,10 +364,18 @@ export async function rewindSession(
         // turn-start's change-gate compares against this post-jump tree (else
         // the restore itself reads as a change and spawns a spurious BASELINE).
         if (restored !== null) await snapshotWorkspace(subprocess, root, sessionId, cwd, 'dsh-history: re-anchor after workspace rewind').catch(() => undefined)
+        // The restored set is exact: observe it (the resumed agent starts with
+        // an empty observation map, so edits would otherwise fail once).
+        if (restored !== null) warmFiles = (await treeFileList(subprocess, wsGit, wsCommit)) ?? []
       } else {
         wsCommit = null
       }
     }
+  }
+  // No restore ran (仅会话, or the paired ws snapshot was missing): the agent
+  // is STILL reborn by resume, so observe every current in-scope file.
+  if (warmFiles.length === 0 && cwd !== undefined && cwd.length > 0) {
+    warmFiles = await currentWorkspaceFiles(root, cwd)
   }
 
   // 4. Detach (flush already done): agent entry, then session entry —
@@ -374,6 +445,7 @@ export async function rewindSession(
   let reloaded = false
   let resumeError: string | undefined
   let compositionWarning: string | undefined
+  let resumeHandle: unknown
   if (agents?.resume !== undefined) {
     const baseOptions: { resumeSessionId: string; agentOptions?: { provider?: string; model?: string } } = {
       resumeSessionId: sessionId,
@@ -400,7 +472,7 @@ export async function rewindSession(
     for (let index = 0; index < tries.length; index += 1) {
       const { options } = tries[index]!
       try {
-        await agents.resume(options)
+        resumeHandle = await agents.resume(options)
         succeededIndex = index
         break
       } catch (error) {
@@ -438,6 +510,15 @@ export async function rewindSession(
     outcome.error = resumeError
     await rm(scratch, { recursive: true, force: true }).catch(() => undefined)
     return outcome
+  }
+
+  // The resume created a NEW agent/session, so the fs-observation policy (keyed
+  // by the agent session) has forgotten every file the model read before the
+  // jump. Re-observe the current workspace so the first edit after the jump
+  // succeeds instead of erroring with "edit requires reading ... first".
+  if (warmFiles.length > 0) {
+    const agentCtx = (resumeHandle as { agent?: { ctx?: unknown } } | undefined)?.agent?.ctx
+    if (agentCtx !== undefined) await warmFsObservation(agentCtx, warmFiles)
   }
 
   // 7. Checkout semantics: the jump target is remembered (in-process) so the
