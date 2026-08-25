@@ -36,7 +36,7 @@ import {
 } from './git-commands.ts'
 import { parseMessage } from './messages.ts'
 import { sessionRepoDir, workspaceRepoDir, legacyWorkspaceRepoDir, sessionBackupDir, ensureBareRepo, ensureHistoryRoot, readExcludes } from './store.ts'
-import { materializeTree, materializeTreeExact, backupWorkspace } from './workspace.ts'
+import { materializeTree, materializeTreeExact, backupWorkspace, snapshotWorkspace } from './workspace.ts'
 import { setJumpTarget } from './state.ts'
 import { decodeTargetFacts, seedBlankSession } from './zstd-util.ts'
 import type { SessionLike, PersistenceLike } from './snapshot.ts'
@@ -217,6 +217,10 @@ export async function rewindSession(
     // ends up byte-identical to the snapshot — extra files are removed too.
     const excludes = await readExcludes(root, cwdWs)
     const restored = await materializeTreeExact(subprocess, wsGit, wsCommit, cwdWs, excludes)
+    // Re-anchor the workspace repo to the restored state so the NEXT turn-start's
+    // "did the code change?" gate compares against THIS (post-jump) tree — else
+    // the restore itself reads as a change and spawns a spurious BASELINE.
+    if (restored !== null) await snapshotWorkspace(subprocess, root, sessionId, cwdWs, 'dsh-history: re-anchor after workspace rewind').catch(() => undefined)
     return {
       ok: restored !== null,
       target,
@@ -293,6 +297,10 @@ export async function rewindSession(
         const excludes = await readExcludes(root, cwd)
         const restored = await materializeTreeExact(subprocess, wsGit, wsCommit, cwd, excludes)
         workspaceRestored = restored !== null
+        // Re-anchor the workspace repo to the restored state so the NEXT
+        // turn-start's change-gate compares against this post-jump tree (else
+        // the restore itself reads as a change and spawns a spurious BASELINE).
+        if (restored !== null) await snapshotWorkspace(subprocess, root, sessionId, cwd, 'dsh-history: re-anchor after workspace rewind').catch(() => undefined)
       } else {
         wsCommit = null
       }
