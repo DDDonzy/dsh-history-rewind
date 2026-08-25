@@ -7,10 +7,11 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { fetchTimeline, rewind, manualSnapshot, get, type TimelineRow } from './api.ts'
-import { ROUTE_PREFIX } from '../constants.ts'
+import { fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit, type TimelineRow } from './api.ts'
+import { ROUTE_PREFIX, SETTINGS_NAMESPACE } from '../constants.ts'
 import { buildGraph, roadSet, type GraphRow, type RailEdge } from './layout.ts'
 import {
   injectStyles,
@@ -31,6 +32,7 @@ import {
   SINGLE_TEXT,
   FILE_LIST,
   FILE_CHIP,
+  FILE_CLIP,
   DIALOG,
   DIALOG_HEAD,
   DIALOG_TITLE,
@@ -42,10 +44,26 @@ import {
   MODAL_CARD,
   MODAL_BODY,
   GRAPH_CELL,
+  PROGRESS_MASK,
+  PROGRESS_CARD,
 } from './styles.ts'
 
 /** Services the browser half requires before it can contribute. */
 export const inject = ['sessions', 'slots']
+
+/** Scope record shape: the per-session binding the runtime keeps resident even
+ *  while the host session is transiently disposed (staged/frozen view). */
+interface ScopeRecordLike {
+  binding?: {
+    session?: {
+      resync?: () => Promise<unknown>
+      /** `host/session-removed` flag the runtime sets on the resident instance.
+       *  A rewind re-adds the same session id, but the runtime never clears it —
+       *  the composer would stay locked as 「会话不可用」 forever. */
+      removed?: boolean
+    }
+  }
+}
 
 /** Structural view of the client sessions service */
 interface SessionsFace {
@@ -55,7 +73,7 @@ interface SessionsFace {
   }
   clear?(): void
   open?(id: string): void
-  scopes?: Map<string, unknown>
+  scopes?: Map<string, ScopeRecordLike>
   deferredRemovals?: Set<string>
   dropScope?(id: string, record: unknown): void
 }
@@ -63,21 +81,53 @@ interface SessionsFace {
 /** Small delay helper. */
 const wait = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
 
-/** Rebind session view */
+/** Rebind session view after a rewind — in place when the runtime allows it.
+ *
+ *  The client Session instance survives the host detach/resume (the runtime's
+ *  resident-instance rule: `host/session-removed` only flags it), so the
+ *  conversation window can be re-pulled WITHOUT tearing down the scope, without
+ *  clearing the selection and without bouncing through the no-session hero.
+ *  `session.resync()` is the runtime's own reconnect rebuild: it resets the
+ *  window and reruns `open()`, and — because the chat assembler is untouched
+ *  until the fresh window installs — the old conversation stays painted while
+ *  the fetch runs, then swaps instantly to the rewind target. No flash.
+ *
+ *  Falls back to the legacy rebuild (scope teardown → clear → reopen, or a
+ *  full page reload) only when the runtime exposes neither `resync` nor the
+ *  scope primitives (older shells, or the instance was really lost).
+ */
 async function rebindView(sessions: SessionsFace, sessionId: string): Promise<string> {
-  await wait(250)
   const record = sessions.scopes?.get(sessionId)
+  const session = record?.binding?.session
+  if (session !== undefined && typeof session.resync === 'function') {
+    try {
+      // The instance survives the host detach (resident-instance rule), but
+      // the runtime never clears the `removed` flag it received from
+      // host/session-removed — the composer would stay locked as
+      // 「会话不可用」 forever. The session is live again (re-added), so clear
+      // the flag as part of the in-place refresh; resync() republishes the
+      // snapshot so the composer unlocks immediately.
+      if (session.removed === true) session.removed = false
+      await session.resync()
+      return '会话视图已原位刷新'
+    } catch {
+      // Instance resync failed (e.g. mid-teardown): fall through to the legacy path.
+    }
+  }
+
+  await wait(250)
+  const record2 = sessions.scopes?.get(sessionId)
   const dropScope = sessions.dropScope
   const clearSelection = sessions.clear
   const openSession = sessions.open
-  if (record === undefined || dropScope === undefined || clearSelection === undefined || openSession === undefined) {
+  if (record2 === undefined || dropScope === undefined || clearSelection === undefined || openSession === undefined) {
     setTimeout(() => { window.location.reload() }, 400)
     return '原语缺失，已自动刷新页面'
   }
   try {
     sessions.deferredRemovals?.delete(sessionId)
     sessions.scopes?.delete(sessionId)
-    dropScope(sessionId, record)
+    dropScope(sessionId, record2)
   } catch {
     setTimeout(() => { window.location.reload() }, 400)
     return 'dropScope 失败，已自动刷新页面'
@@ -137,13 +187,16 @@ function timeOf(ct: number): string {
 /** Max changed-file chips shown per row; overflow collapses into "+N". */
 const MAX_FILES = 12
 
-/** Render a changed-file chip line: at most MAX_FILES chips + "+N" indicator. */
+/** Render a changed-file chip line: at most MAX_FILES chips + "+N" indicator,
+ *  kept on a single line by clipping overflow (BASELINE & TURN rows). */
 function FileChips(props: { files: string[] }): ReactNode {
   const { files } = props
   if (files.length === 0) return null
   return createElement('div', { className: FILE_LIST },
-    files.slice(0, MAX_FILES).map((file) =>
-      createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
+    createElement('div', { className: FILE_CLIP },
+      files.slice(0, MAX_FILES).map((file) =>
+        createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
+      ),
     ),
     files.length > MAX_FILES
       ? createElement('code', { className: FILE_CHIP, style: { color: 'var(--dsw-alias-label-secondary, #999)' } },
@@ -177,8 +230,12 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean }): ReactNode {
       createElement('div', { className: ROW_MAIN },
         createElement('div', { className: `${SINGLE_LINE} ${FILE_LIST}` },
           createElement('span', { className: 'dsh-badge dsh-badge-turn-start' }, 'BASELINE'),
-          shown.map((file) =>
-            createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
+          // Chip clip: single line only — overflow clips and each chip shrinks,
+          // so the trailing "+N" always stays visible on the same line.
+          createElement('div', { className: FILE_CLIP },
+            shown.map((file) =>
+              createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
+            ),
           ),
           files.length > MAX_FILES
             ? createElement('code', { className: FILE_CHIP, style: { color: 'var(--dsw-alias-label-secondary, #999)' } },
@@ -268,11 +325,16 @@ function GraphCell(props: {
   headLanes: number[]
   isHead: boolean
   isHovered: boolean
+  /** Shas NEWER than HEAD ("future" children past the current position).
+   * Colour follows the RAIL (its endpoint pair), exactly like the hover
+   * highlight: an edge whose child is in this set draws blue-grey; HEAD and
+   * its ancestors keep the normal vivid blue. */
+  futureSet: Set<string>
   height: number
   /** Non-null when some row is hovered: shas on that row's ancestor path. */
   hoverPath: Set<string> | null
 }) {
-  const { row, lanes, colors, headLanes, isHead, isHovered, height, hoverPath } = props
+  const { row, lanes, colors, headLanes, isHead, isHovered, futureSet, height, hoverPath } = props
   // +8 right margin + 12 left inset (laneX base): keeps even hovered ring
   // (r ~ 7.5 + stroke) fully inside the cell.
   const width = Math.max(1, lanes) * LANE_W + 8
@@ -286,6 +348,12 @@ function GraphCell(props: {
   // the fork point (a head-road row).
   const grey = '#6b6b6d'
   const HOVER = '#4d88ff' // bright accent blue for the hovered ancestor path
+  // "Beyond HEAD": a rail whose child is a row NEWER than the current position
+  // draws in a blue-grey BETWEEN the brand blue and the rail grey. Like the
+  // hover highlight, colour follows the RAIL (endpoint pair), never the row —
+  // a rail keeps ONE colour across every row it crosses. HEAD and its
+  // ancestors keep the normal vivid blue; abandoned forks stay plain grey.
+  const AFTER_HEAD = '#7086ab'
   const onHead = (lane: number): boolean => headLanes.includes(lane)
 
   // Hover path: shas on the hovered row's ancestor chain (incl. itself).
@@ -304,11 +372,18 @@ function GraphCell(props: {
   const strokeOf = (edge: RailEdge): string => {
     if (hoverEdge(edge)) return HOVER
     if (hovering) return grey
+    // Rail colour is endpoint-driven: an edge leading INTO the future set
+    // (its child is newer than HEAD) is the blue-grey, even where it crosses
+    // head-row cells; HEAD's own rail keeps the vivid blue.
+    if (futureSet.has(edge.childSha)) return AFTER_HEAD
     return onHead(edge.lane) ? colors[edge.lane % colors.length]! : grey
   }
   const nodeColor = onPath
     ? HOVER
-    : hovering ? grey : (onHead(row.lane) ? colors[row.lane % colors.length]! : grey)
+    : hovering ? grey
+    : isHead ? colors[row.lane % colors.length]!
+    : futureSet.has(row.sha) ? AFTER_HEAD
+    : (onHead(row.lane) ? colors[row.lane % colors.length]! : grey)
   const railOpacity = (edge: RailEdge): number => {
     if (hoverEdge(edge)) return 1
     if (hovering) return 0.45 // dim non-path rails to keep focus
@@ -350,7 +425,7 @@ function GraphCell(props: {
         r: onPath ? NODE_R + 3 : NODE_R + 1,
         fill: 'var(--dsw-alias-bg-base, #1e1e1e)',
         stroke: nodeColor,
-        strokeWidth: onPath ? 2.6 : 2,
+        strokeWidth: onPath ? 2.6 : isHead ? 2.4 : 2,
       })
     : createElement('circle', {
         className: nodeClass,
@@ -385,33 +460,113 @@ function HistoryRow(props: {
   anchor: boolean
   /** HEAD sha, for the data-sha hook used by initial centering. */
   headSha: string | null
+  /** Measured per-sha row heights (from the live DOM) so the graph rails track
+   *  rows that are taller than the estimated constant (e.g. wrapped content). */
+  rowHeights: Record<string, number>
+  /** Report a row's real painted height up to the panel. */
+  onMeasure: (sha: string, height: number) => void
+  /** Shas newer than HEAD (see GraphCell.futureSet). */
+  futureSet: Set<string>
 }) {
-  const { row, lanes, colors, headLanes, isHead, isHovered, isSelected, hoverPath, onHover, onSelect, anchor, headSha } = props
-  const height = rowHeightOf(row)
+  const { row, lanes, colors, headLanes, isHead, isHovered, isSelected, hoverPath, onHover, onSelect, anchor, headSha, rowHeights, onMeasure, futureSet } = props
+  const estimatedHeight = rowHeightOf(row)
+  // Prefer the measured height once it is available — it reflects wrapped
+  // content, so the graph cell (and its rails) fill the whole row.
+  const height = rowHeights[row.sha] ?? estimatedHeight
+  // Capture the real painted height (>= the estimate) so rails run the full
+  // row. A stable ref identity keeps React from re-measuring on re-renders.
+  const setRowEl = useCallback((node: HTMLDivElement | null): void => {
+    if (node !== null) onMeasure(row.sha, node.offsetHeight)
+  }, [row.sha, onMeasure])
   return createElement('div', {
     className: `${ROW} ${isSelected ? 'is-selected' : ''}`,
-    style: { minHeight: height },
+    style: { minHeight: estimatedHeight },
+    ref: setRowEl,
     'data-sha': row.sha,
     ...(anchor ? { 'data-anchor': row.sha } : {}),
     onMouseEnter: () => onHover(row.sha),
     onMouseLeave: () => onHover(null),
     onClick: () => onSelect(row),
   },
-    createElement(GraphCell, { row, lanes, colors, headLanes, isHead, isHovered, height, hoverPath }),
+    createElement(GraphCell, { row, lanes, colors, headLanes, isHead, isHovered, futureSet, height, hoverPath }),
     createElement(RowContentNode, { row, isHead }),
   )
 }
 
+/** Rewind progress reported to the shell: an opaque mask + centered status
+ *  card once the panel closes at confirm, fading out after the view refreshed. */
+type RewindPhase = 'working' | 'refreshing' | 'done' | 'idle'
+
+/** Session id currently in the middle of a rewind: while set, client-side
+ *  `host/session-removed` frames are intercepted so the session is never
+ *  dropped from the list store, preventing `current` from becoming undefined
+ *  and stopping the chat view from jumping to the initial blank hero page. */
+let suppressingSessionId: string | null = null
+
 /** History Panel */
-function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) => Promise<string> }) {
-  const { sessionId, rebind } = props
+function HistoryPanel(props: {
+  sessionId: string
+  rebind: (sessionId: string) => Promise<string>
+  /** Close the panel (immediately on a confirmed rewind). */
+  onRewound: () => void
+  /** Reopen the panel with an error notice (rewind failed after immediate close). */
+  onRewindFailed: (text: string) => void
+  /** Rewind progress: 'working' while the host rewinds, 'refreshing' while the
+   *  conversation view re-pulls, 'done' after it landed, 'idle' on failure. */
+  onProgress: (phase: RewindPhase, sha: string) => void
+  /** Render the confirm dialog into the plugin's own root container so the
+   *  panel card can be hidden while the dialog is open. */
+  portalTo: HTMLElement
+  /** True while the rewind confirm dialog is open (panel card hides for it). */
+  onDialogOpen: (open: boolean) => void
+  /** Consumed at mount: show a pending failure notice from a rewind that
+   *  failed while the panel was closed. */
+  initialNotice?: string
+  onInitialNoticeConsumed?: () => void
+}) {
+  const {
+    sessionId, rebind, onRewound, onRewindFailed, onProgress, portalTo,
+    onDialogOpen, initialNotice, onInitialNoticeConsumed,
+  } = props
   const [rows, setRows] = useState<TimelineRow[] | null | undefined>(undefined)
   const [head, setHead] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [selected, setSelected] = useState<TimelineRow | null>(null)
-  const [notice, setNotice] = useState<string>('')
+  const [notice, setNotice] = useState<string>(initialNotice ?? '')
+  // A failure notice pushed while the panel was closed arrives through the
+  // initialNotice prop on the next (re)mount; when it changes while mounted,
+  // surface it too, then acknowledge consumption so the shell clears it.
+  useEffect(() => {
+    if (initialNotice === undefined) return
+    setNotice(initialNotice)
+    onInitialNoticeConsumed?.()
+  }, [initialNotice, onInitialNoticeConsumed])
+
+  // While the rewind dialog is open, the shell hides the panel card; report the
+  // open/close transition so the shell can re-show it on cancel.
+  const dialogOpen = selected !== null
+  useEffect(() => {
+    onDialogOpen(dialogOpen)
+  }, [dialogOpen, onDialogOpen])
+  // Escape cancels the dialog first (the shell's Escape handler skips while the
+  // dialog is open — otherwise it would close the whole panel).
+  useEffect(() => {
+    if (!dialogOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setSelected(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [dialogOpen])
   /** Row currently hovered (sha), for ancestor-path highlight. */
   const [hoverSha, setHoverSha] = useState<string | null>(null)
+  /** Measured per-sha row heights (real DOM height), keyed by sha. Falling back
+   *  to the estimate lets the graph stretch to wrapped/taller rows. */
+  const [rowHeights, setRowHeights] = useState<Record<string, number>>({})
+  /** Store a row's measured height; no-op re-render when it already matches. */
+  const measureRow = useCallback((sha: string, height: number): void => {
+    setRowHeights((prev) => (prev[sha] === height ? prev : { ...prev, [sha]: height }))
+  }, [])
   /** 500ms hover-delay timer: the graph only switches to the hovered path
    *  after the pointer rests on a row; leaving restores the current style
    *  immediately (the graph stays on HEAD unless the user wants to switch). */
@@ -452,6 +607,18 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
 
   const graph = useMemo(() => (rows === undefined || rows === null ? null : buildGraph(rows, head)), [rows, head])
   const headSha = head
+
+  // HEAD-relative ordering: rows after HEAD's row (oldest-first) are the
+  // "future" children. The set drives rail colour by ENDPOINT (like the hover
+  // highlight) so a rail keeps one colour across every row it crosses. MUST be
+  // declared before the early returns below (hooks order must be stable).
+  const headIndex = headSha !== null && graph !== null ? graph.rows.findIndex((r) => r.sha === headSha) : -1
+  const futureSet = useMemo(() => {
+    const set = new Set<string>()
+    if (headIndex < 0 || graph === null) return set
+    for (let i = headIndex + 1; i < graph.rows.length; i++) set.add(graph.rows[i]!.sha)
+    return set
+  }, [graph, headIndex])
 
   // ---- Windowed timeline: load ±20 around the current (HEAD) position, then
   // extend by pages while scrolling toward either end. The full row list is
@@ -534,23 +701,40 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
 
   const doRewind = async (withWorkspace: boolean): Promise<void> => {
     if (selected === null) return
-    setBusy(true)
-    setNotice('')
-    const result = await rewind(sessionId, selected.sha, withWorkspace)
+    // User confirmed the jump: close the panel NOW, before the host work
+    // starts. The rewind runs in the background; the conversation area is
+    // refreshed in place once (rebindView below) once the host resumes —
+    // the panel is out of the way from the very first click.
+    onRewound()
+    const target = selected
     setSelected(null)
-    setBusy(false)
-    if (!result.ok) {
-      setNotice(`${result.reason ?? 'failed'}${result.error !== undefined ? `：${result.error}` : ''}`)
-      return
+    const sha = target.sha.slice(0, 7)
+    onProgress('working', sha)
+    try {
+      suppressingSessionId = sessionId
+      const result = await rewind(sessionId, target.sha, withWorkspace)
+      if (!result.ok) {
+        onProgress('idle', '')
+        onRewindFailed(`回档失败：${result.reason ?? 'unknown'}${result.error !== undefined ? `（${result.error}）` : ''}`)
+        return
+      }
+      if (result.detached === true) {
+        // Resume failed and the session is gone: a full page reload is the only
+        // honest recovery for the client view.
+        onProgress('idle', '')
+        setTimeout(() => { window.location.reload() }, 400)
+        return
+      }
+      // In-place refresh of the conversation window (no hero, no blank flash).
+      onProgress('refreshing', sha)
+      await rebind(sessionId)
+      onProgress('done', sha)
+    } finally {
+      // Delay clearing slightly so any trailing host/session-removed frames settle
+      setTimeout(() => {
+        if (suppressingSessionId === sessionId) suppressingSessionId = null
+      }, 500)
     }
-    setNotice(`已回退 ✓ ${result.target !== undefined ? `目标 ${result.target.slice(0, 7)}` : ''}（继续对话将开辟新分支）${result.workspaceRestored === true ? ' · 工作区已恢复' : ''}${result.noWorkspaceSnapshot === true ? ' · 无配对工作区快照' : ''}${result.compositionWarning !== undefined ? ` · ⚠ ${result.compositionWarning}` : ''}`)
-    await load()
-    if (result.detached === true) {
-      setTimeout(() => { window.location.reload() }, 400)
-      return
-    }
-    const detail = await rebind(sessionId)
-    setNotice(`${notice !== '' ? `${notice} · ` : ''}${detail}`)
   }
 
   /** Restore only the paired workspace tree; the live session is untouched. */
@@ -591,7 +775,6 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
       createElement('div', { style: { color: 'var(--dsw-alias-label-secondary, #888)', textAlign: 'center', maxWidth: 360, lineHeight: 1.5, fontSize: 12 } },
         '当前会话尚未产生快照。发送消息后，TURN 开始与结束将自动记录。',
       ),
-      createElement('button', { className: `${BUTTON} primary`, disabled: busy, onClick: () => void doSnapshot() }, '立即快照'),
     )
   }
 
@@ -601,6 +784,9 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
     ? graph.rows.slice(winStart.start, winStart.end)
     : graph !== null ? graph.rows.slice(Math.max(0, graph.rows.length - PAGE * 2)) : null
 
+  // HEAD-relative ordering is computed at the top (see the hook block near
+  // `graph`); nothing hook-related lives after the early returns.
+
   return createElement('div', { className: PANEL },
     // Scrollable Flat Timeline List (Trajectory style), windowed ±20 around HEAD
     createElement('div', {
@@ -608,7 +794,7 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
       ref: (node: HTMLDivElement | null): void => { listRef.current = node },
       onScroll,
     },
-      laid !== null && laid.map((row) =>
+      laid !== null && laid.map((row, listIdx) =>
         createElement(HistoryRow, {
           key: row.sha,
           row,
@@ -629,64 +815,79 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
           },
           anchor: row.sha === headSha,
           headSha,
+          rowHeights,
+          onMeasure: measureRow,
+          futureSet,
         }),
       ),
     ),
 
-    // Selected Row Rewind Dialog (DSH Modal 451:18655 — mask + centered card)
+    // Selected Row Rewind Dialog — portaled into the plugin's own root so the
+    // panel card can be hidden while it is open (the dialog floats over the
+    // page; cancel returns the timeline exactly as it was).
     selected !== null
-      ? createElement('div', {
-          className: MODAL_BACKDROP,
-          style: { position: 'absolute', inset: 0, zIndex: 50, padding: 16 },
-          onClick: () => setSelected(null),
-        },
+      ? createPortal(
           createElement('div', {
-            className: DIALOG,
-            style: { margin: 0, animation: 'dshSlideUp 0.15s ease-out' },
-            onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+            className: MODAL_BACKDROP,
+            style: {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 10001,
+              padding: 16,
+              background: 'transparent',
+              backdropFilter: 'none',
+            },
+            onClick: () => setSelected(null),
           },
-            createElement('div', { className: DIALOG_HEAD },
-              createElement('h2', { className: DIALOG_TITLE }, '回档'),
-              createElement('button', {
-                className: DIALOG_CLOSE,
-                title: '关闭',
-                onClick: () => setSelected(null),
-              }, '✕'),
-            ),
-            // Question line: short commit id, bold. No time element.
-            createElement('p', { className: DIALOG_DESCRIPTION },
-              '要把当前会话退回到版本 ',
-              createElement('code', {
-                style: {
-                  fontFamily: 'var(--ds-font-family-code, monospace)',
-                  fontSize: '0.92em',
-                  fontWeight: 700,
-                  color: 'var(--dsw-alias-label-primary, #e8e8e8)',
-                },
-              }, selected.sha.slice(0, 7)),
-              ' 吗？',
-            ),
-            createElement('div', { className: DIALOG_FOOT },
-              createElement('button', {
-                className: `${BUTTON} outline`,
-                disabled: busy,
-                title: '仅回退会话消息，不动工作区文件',
-                onClick: () => void doRewind(false),
-              }, '仅会话'),
-              createElement('button', {
-                className: `${BUTTON} outline`,
-                disabled: busy,
-                title: '仅将工作区文件恢复到该版本，不动会话',
-                onClick: () => void doWorkspaceOnly(),
-              }, '仅工作区'),
-              createElement('button', {
-                className: `${BUTTON} outline`,
-                disabled: busy,
-                title: '回退会话消息并同步恢复配对的工作区文件',
-                onClick: () => void doRewind(true),
-              }, busy ? '处理中…' : '会话和工作区'),
+            createElement('div', {
+              className: DIALOG,
+              style: { margin: 0, animation: 'dshSlideUp 0.15s ease-out' },
+              onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+            },
+              createElement('div', { className: DIALOG_HEAD },
+                createElement('h2', { className: DIALOG_TITLE }, '回档'),
+                createElement('button', {
+                  className: DIALOG_CLOSE,
+                  title: '关闭',
+                  onClick: () => setSelected(null),
+                }, '✕'),
+              ),
+              // Question line: short commit id, bold. No time element.
+              createElement('p', { className: DIALOG_DESCRIPTION },
+                '要把当前会话退回到版本 ',
+                createElement('code', {
+                  style: {
+                    fontFamily: 'var(--ds-font-family-code, monospace)',
+                    fontSize: '0.92em',
+                    fontWeight: 700,
+                    color: 'var(--dsw-alias-label-primary, #e8e8e8)',
+                  },
+                }, selected.sha.slice(0, 7)),
+                ' 吗？',
+              ),
+              createElement('div', { className: DIALOG_FOOT },
+                createElement('button', {
+                  className: `${BUTTON} outline`,
+                  disabled: busy,
+                  title: '仅回退会话消息，不动工作区文件',
+                  onClick: () => void doRewind(false),
+                }, '仅会话'),
+                createElement('button', {
+                  className: `${BUTTON} outline`,
+                  disabled: busy,
+                  title: '仅将工作区文件恢复到该版本，不动会话',
+                  onClick: () => void doWorkspaceOnly(),
+                }, '仅工作区'),
+                createElement('button', {
+                  className: `${BUTTON} outline`,
+                  disabled: busy,
+                  title: '回退会话消息并同步恢复配对的工作区文件',
+                  onClick: () => void doRewind(true),
+                }, busy ? '处理中…' : '会话和工作区'),
+              ),
             ),
           ),
+          portalTo,
         )
       : null,
 
@@ -705,11 +906,137 @@ function HistoryPanel(props: { sessionId: string; rebind: (sessionId: string) =>
   )
 }
 
+/** Plugin config card (设置/插件/插件配置 → history-rewind): reports whether
+ *  git is available on the host and offers a one-click install when it is not. */
+function GitPluginCard(): ReactNode {
+  const [available, setAvailable] = useState<boolean | null>(null)
+  const [version, setVersion] = useState('')
+  const [installing, setInstalling] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [detail, setDetail] = useState('')
+  const refresh = async (): Promise<void> => {
+    const r = await gitStatus()
+    setAvailable(r.available)
+    setVersion(r.version ?? '')
+    if (r.message !== undefined && r.message.length > 0) setNotice(r.message)
+  }
+  useEffect(() => { void refresh() }, [])
+  const doInstall = async (): Promise<void> => {
+    setInstalling(true)
+    setNotice('')
+    setDetail('')
+    const r = await installGit()
+    setInstalling(false)
+    if (r.installed === true) {
+      setNotice('已触发安装 Git。安装完成后请重启 DSH，让宿主进程识别新装的 git。')
+    } else {
+      setNotice(r.message ?? '安装失败。')
+      if (r.detail !== undefined && r.detail.length > 0) setDetail(r.detail)
+    }
+    void refresh()
+  }
+  const status = available === null
+    ? createElement('span', { style: { color: 'var(--dsw-alias-label-secondary, #999)' } }, '检测中…')
+    : available
+      ? createElement('span', { style: { color: 'var(--dsw-alias-state-success-primary, #34d399)' } }, '可用')
+      : createElement('span', { style: { color: 'var(--dsw-alias-state-error-primary, #f87171)' } }, '不可用')
+  return createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, width: '100%' } },
+    createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+      createElement('span', { style: { fontWeight: 600, fontSize: 13 } }, 'Git'),
+      status,
+      available === true && version.length > 0
+        ? createElement('code', { style: { fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)' } }, version)
+        : null,
+    ),
+    available === false
+      ? createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+          createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.5 } },
+            '本插件依赖 Git。检测到 Git 未安装，快照与回退功能将无法使用。'),
+          createElement('button', {
+            type: 'button',
+            disabled: installing,
+            onClick: () => void doInstall(),
+            style: {
+              alignSelf: 'flex-start',
+              padding: '6px 14px',
+              borderRadius: 6,
+              border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+              background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
+              color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+              fontSize: 12,
+              cursor: installing ? 'default' : 'pointer',
+            },
+          }, installing ? '正在安装…' : '安装 Git'),
+        )
+      : null,
+    notice.length > 0
+      ? createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.5, whiteSpace: 'pre-wrap' } }, notice)
+      : null,
+    detail.length > 0
+      ? createElement('pre', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #888)', maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0 } }, detail)
+      : null,
+  )
+}
+
+/** Full settings page (设置 → history-rewind): wraps the git status/install
+ *  card in a page layout. The shell supplies { close, useSessions,
+ *  useWorkspaces }; this card only needs the git check, so extra props are
+ *  ignored. */
+function HistoryRewindSettingsPage(): ReactNode {
+  return createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, width: '100%', padding: '4px 0' } },
+    createElement('div', {
+      style: {
+        fontSize: 14,
+        fontWeight: 600,
+        color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+      },
+    }, 'history-rewind'),
+    createElement('div', {
+      style: {
+        fontSize: 12,
+        color: 'var(--dsw-alias-label-secondary, #999)',
+        lineHeight: 1.5,
+        maxWidth: 520,
+      },
+    }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。'),
+    createElement(GitPluginCard),
+  )
+}
+
 /** Mount floating widget */
 export function apply(ctx: Context): void {
-  const svc = ctx.get('sessions') as SessionsFace | undefined
+  const svc = ctx.get('sessions') as (SessionsFace & {
+    handleHostEnvelope?: (env: unknown) => void
+    manager?: { handleHostEnvelope?: (env: unknown) => void }
+  }) | undefined
   if (svc === undefined) return
   injectStyles()
+
+  // Suppress host/session-removed envelopes for the exact session currently being
+  // rewound. The host briefly detaches and resumes the session to restore disk state;
+  // suppressing the client-side removal keeps the session resident in the list store,
+  // preventing `current` from becoming undefined and completely eliminating the
+  // jarring jump/flash to the initial blank hero page!
+  if (typeof svc.handleHostEnvelope === 'function') {
+    const origHandle = svc.handleHostEnvelope.bind(svc)
+    svc.handleHostEnvelope = (envelope: unknown) => {
+      const frame = (envelope as { payload?: { type?: string; sessionId?: string } })?.payload
+      if (frame?.type === 'host/session-removed' && frame?.sessionId === suppressingSessionId) {
+        return
+      }
+      origHandle(envelope)
+    }
+  }
+  if (svc.manager && typeof svc.manager.handleHostEnvelope === 'function') {
+    const origManagerHandle = svc.manager.handleHostEnvelope.bind(svc.manager)
+    svc.manager.handleHostEnvelope = (envelope: unknown) => {
+      const frame = (envelope as { payload?: { type?: string; sessionId?: string } })?.payload
+      if (frame?.type === 'host/session-removed' && frame?.sessionId === suppressingSessionId) {
+        return
+      }
+      origManagerHandle(envelope)
+    }
+  }
 
   // The modal shell renders in its own root, always mounted; the HISTORY
   // trigger flips `open` via a shared subscription.
@@ -723,9 +1050,22 @@ export function apply(ctx: Context): void {
     open = value
     for (const listener of listeners) listener()
   }
+  /** Failure notice from a rewind that failed while the panel was closed
+   *  (it closes immediately on confirm); delivered to the next panel mount. */
+  let pendingRewindNotice: string | null = null
 
   const HistoryPanelShell = () => {
     const current = svc.list.getSnapshot().current
+    // The runtime's list drops the session while a rewind detaches it on the
+    // host (current transiently undefined). Keep the LAST known session id so
+    // the panel stays mounted (and its content stable) across that gap instead
+    // of unmounting and popping back once the session re-lists — the old
+    // disappear → reappear "refresh" flash.
+    const lastId = useRef<string | undefined>(undefined)
+    useEffect(() => {
+      if (current !== undefined) lastId.current = current
+    }, [current])
+    const sessionId = current ?? lastId.current
     const [, force] = useState(0)
     useEffect(() => {
       const listener = (): void => force((v) => v + 1)
@@ -733,46 +1073,109 @@ export function apply(ctx: Context): void {
       return () => { listeners.delete(listener) }
     }, [])
     useEffect(() => svc.list.subscribe(() => force((v) => v + 1)), [])
-    // Focus the panel when it opens, and close it on Escape.
+    // The rewind confirm dialog open state: the panel card hides while the
+    // dialog floats over the page (cancel restores the timeline untouched).
+    const [dialogOpen, setDialogOpen] = useState(false)
+    // Rewind progress: an opaque mask + centered status card from confirm until
+    // the conversation view has refreshed in place. The mask hides everything
+    // while the host rewinds — including the platform's brief no-session hero
+    // between detach and resume — and the whole layer fades out after the
+    // "done" beat, revealing the swapped conversation as one designed move.
+    const [progress, setProgress] = useState<{ phase: RewindPhase; sha: string; fading: boolean }>({ phase: 'idle', sha: '', fading: false })
+    useEffect(() => {
+      if (progress.phase !== 'done') return
+      const fadeTimer = setTimeout(() => {
+        setProgress((prev) => (prev.phase === 'done' ? { ...prev, fading: true } : prev))
+      }, 600)
+      const doneTimer = setTimeout(() => {
+        setProgress((prev) => (prev.phase === 'done' ? { phase: 'idle', sha: '', fading: false } : prev))
+      }, 1050)
+      return () => { clearTimeout(fadeTimer); clearTimeout(doneTimer) }
+    }, [progress.phase])
+    // Focus the panel when it opens, and close it on Escape (the dialog owns
+    // Escape while it is open — it cancels itself instead).
     const cardRef = { current: null as HTMLDivElement | null }
     useEffect(() => {
       if (!open) return
       const card = cardRef.current
       card?.focus()
       const onKeyDown = (event: KeyboardEvent): void => {
-        if (event.key === 'Escape') setOpen(false)
+        if (event.key === 'Escape' && !dialogOpen) setOpen(false)
       }
       window.addEventListener('keydown', onKeyDown)
       return () => window.removeEventListener('keydown', onKeyDown)
-    }, [open])
-    if (!open || current === undefined) return null
-    return createElement('div', {
-      className: MODAL_BACKDROP,
-      onClick: () => setOpen(false),
-    },
-      createElement('div', {
-        className: MODAL_CARD,
-        tabIndex: -1,
-        ref: (node: HTMLDivElement | null): void => { cardRef.current = node },
-        style: { outline: 'none' },
-        onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
-      },
-        createElement('button', {
-          className: 'dsh-history-dialog-close',
-          title: '关闭',
-          style: {
-            position: 'absolute',
-            top: 16,
-            right: 20,
-            zIndex: 60,
-            background: 'var(--dsw-alias-bg-layer-2, #2d2d2e)',
-            border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.14))',
-          },
+    }, [open, dialogOpen])
+
+    const panel = open && sessionId !== undefined
+      ? createElement('div', {
+          className: MODAL_BACKDROP,
           onClick: () => setOpen(false),
-        }, '✕'),
-        createElement(HistoryPanel, { sessionId: current, rebind: (id) => rebindView(svc, id) }),
-      ),
-    )
+        },
+          createElement('div', {
+            className: MODAL_CARD,
+            tabIndex: -1,
+            ref: (node: HTMLDivElement | null): void => { cardRef.current = node },
+            // Hidden (kept mounted) while the rewind dialog is open: the dialog
+            // is portaled into the plugin's own root and floats alone.
+            style: { outline: 'none', ...(dialogOpen ? { display: 'none' } : {}) },
+            onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+          },
+            createElement('button', {
+              className: 'dsh-history-dialog-close',
+              title: '关闭',
+              style: {
+                position: 'absolute',
+                top: 16,
+                right: 20,
+                zIndex: 60,
+                background: 'var(--dsw-alias-bg-layer-2, #2d2d2e)',
+                border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.14))',
+              },
+              onClick: () => setOpen(false),
+            }, '✕'),
+            createElement(HistoryPanel, {
+              sessionId,
+              rebind: (id) => rebindView(svc, id),
+              onRewound: () => setOpen(false),
+              onRewindFailed: (text) => {
+                pendingRewindNotice = text
+                setOpen(true)
+              },
+              onProgress: (phase, sha) => setProgress({ phase, sha, fading: false }),
+              portalTo: host,
+              onDialogOpen: setDialogOpen,
+              initialNotice: pendingRewindNotice ?? undefined,
+              onInitialNoticeConsumed: () => { pendingRewindNotice = null },
+            }),
+          ),
+        )
+      : null
+
+    const progressUi = progress.phase === 'idle'
+      ? null
+      : createElement(Fragment, null,
+          createElement('div', {
+            className: PROGRESS_MASK,
+            style: { opacity: progress.fading ? 0 : 1 },
+          }),
+          createElement('div', {
+            className: PROGRESS_CARD,
+            style: { opacity: progress.fading ? 0 : 1 },
+          },
+            progress.phase === 'done'
+              ? createElement('span', { className: 'dsh-history-progress-done' }, '✓')
+              : createElement('div', { className: 'dsh-history-progress-spin' }),
+            createElement('div', { className: 'dsh-history-progress-text' },
+              createElement('div', { className: 'dsh-history-progress-title' },
+                progress.phase === 'working' ? '正在回退…'
+                  : progress.phase === 'refreshing' ? '正在刷新会话…'
+                  : '已回退'),
+              createElement('code', { className: 'dsh-history-progress-sha' }, progress.sha),
+            ),
+          ),
+        )
+
+    return createElement(Fragment, null, panel, progressUi)
   }
   root.render(createElement(HistoryPanelShell))
 
@@ -788,6 +1191,19 @@ export function apply(ctx: Context): void {
       id: 'history',
       order: 10,
     }, HistoryHeaderAction))
+  }
+
+  // Settings entry (设置 → history-rewind). DSH's "插件配置" region only lists
+  // host-plane plugins; dsh-history-rewind is a profile plugin, so its card
+  // never renders there. A dedicated settings.section page is the reliable,
+  // guaranteed-visible place for this plugin.
+  if (slots !== undefined) {
+    slots.inject('settings.section', () => slots.register({
+      name: 'settings.section',
+      id: SETTINGS_NAMESPACE,
+      order: 30,
+      label: SETTINGS_NAMESPACE,
+    }, HistoryRewindSettingsPage) as unknown)
   }
 
   // Zero-polling command bridge: register the /history command's durable chat

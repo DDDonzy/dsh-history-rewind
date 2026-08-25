@@ -25,7 +25,7 @@ import {
   argvUpdateRef, argvRevParseCommit, argvListTree, argvReadTree, argvCheckoutIndex,
   commitEnv, MODE_FILE, MODE_EXEC, type ShadowRepo,
 } from './git-commands.ts'
-import { acquireLock, ensureBareRepo, ensureExcludes, readExcludes, workspaceRepoDir, workspaceBackupDir, projectSegment } from './store.ts'
+import { acquireLock, ensureBareRepo, ensureExcludes, readExcludes, workspaceRepoDir, workspaceBackupDir } from './store.ts'
 
 /** One file in the walk. */
 interface WalkFile {
@@ -174,9 +174,10 @@ export interface WorkspaceSnapshotResult {
 }
 
 /**
- * Snapshot the whole workspace into its project shadow repo.
+ * Snapshot the whole workspace into the session's own shadow repo.
  * @param subprocess - the subprocess service.
  * @param root - history root.
+ * @param sessionId - the session that owns this workspace history.
  * @param cwd - the workspace root to snapshot.
  * @param message - commit message (authored by the caller with the contract).
  * @returns the snapshot result.
@@ -184,15 +185,17 @@ export interface WorkspaceSnapshotResult {
 export async function snapshotWorkspace(
   subprocess: SubprocessLike,
   root: string,
+  sessionId: string,
   cwd: string,
   message: string,
 ): Promise<WorkspaceSnapshotResult> {
-  const lock = await acquireLock(root, `ws-${projectSegment(cwd)}`)
+  const lockSeg = sessionId.replace(/[^\w.-]/g, '_')
+  const lock = await acquireLock(root, `ws-session-${lockSeg}`)
   if (lock === null) return { ok: false, reason: 'lock-busy' }
   try {
-    const repoDir = workspaceRepoDir(root, cwd)
+    const repoDir = workspaceRepoDir(root, sessionId)
     if (!(await ensureBareRepo(subprocess, repoDir))) return { ok: false, reason: 'git-unavailable' }
-    await ensureExcludes(root, cwd)
+    await ensureExcludes(root, sessionId)
     const excludes = await readExcludes(root, cwd)
     const matcher = compileExcludes(excludes)
     const files = await walkFiles(cwd, matcher)
@@ -331,18 +334,19 @@ export async function materializeTree(
 }
 
 /**
- * Backup the current workspace tree into backups/ws-<project>/pre-rewind-<ts>.
+ * Backup the current workspace tree into backups/ws-session-<id>/pre-rewind-<ts>.
  * Follows the same exclude rules as snapshots: .git and excluded dirs are not
  * copied, and everything under historyRoot is never copied (guard).
  * @param root - history root (also defines the backup destination).
+ * @param sessionId - the session whose workspace is backed up.
  * @param cwd - the workspace root.
  * @returns the backup directory, or null (failure / unsafe).
  */
-export async function backupWorkspace(root: string, cwd: string): Promise<string | null> {
+export async function backupWorkspace(root: string, sessionId: string, cwd: string): Promise<string | null> {
   const absCwd = resolve(cwd)
   const absRoot = resolve(root)
   if (absCwd === absRoot || absCwd.startsWith(`${absRoot}${sep}`)) return null
-  const dest = join(workspaceBackupDir(root, cwd), `pre-rewind-${Date.now()}`)
+  const dest = join(workspaceBackupDir(root, sessionId), `pre-rewind-${Date.now()}`)
   const matcher = compileExcludes(['.git'])
   try {
     await cp(absCwd, dest, {

@@ -38,7 +38,7 @@ import {
 import { ensureBareRepo, ensureHistoryRoot, sessionRepoDir } from './store.ts'
 import { snapshotWorkspace, materializeTree, type WorkspaceSnapshotResult } from './workspace.ts'
 import { getJumpTarget, clearJumpTarget, ROAD_REF_PREFIX, roadTimestamp } from './state.ts'
-import { decodeSessionEventsFromBytes, semanticallyEqual, extractMessagePreviews, preTurnPrefixLength } from './zstd-util.ts'
+import { decodeSessionEventsFromBytes, semanticallyEqual, extractMessagePreviews, preTurnPrefixLength, appendEmptyTurn } from './zstd-util.ts'
 import { mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -142,8 +142,13 @@ export async function captureSessionArtifact(
   if (kind === 'turn-start' && full !== undefined) {
     try {
       const cut = preTurnPrefixLength(full)
-      if (cut < full.length) {
-        const prefix = full.subarray(0, cut)
+      // Every BASELINE (turn-start) snapshot appends one bare EMPTY turn pair
+      // (turn/start → turn/end, no messages): the snapshot itself always
+      // carries a turn/start, so DSH's sessionBlank check passes for ANY
+      // backup point — rewinding onto it yields a live empty session, never
+      // the brand-new hero page. No "is this the first message" special case.
+      const prefix = appendEmptyTurn(full.subarray(0, cut))
+      if (prefix.length !== full.length) {
         tempPath = join(root, `capture-${session.id.replace(/[^\w.-]/g, '_')}-${Date.now()}.tmp`)
         await writeFile(tempPath, prefix)
         hashPath = tempPath
@@ -351,7 +356,7 @@ export async function takeSnapshot(
     ? runGit(subprocess, ['git', `--git-dir=${sessionRepo.gitDir}`, 'rev-parse', '--verify', '--quiet', `${base}:session-${sessionId}/session.jsonl.zstd`], root, env)
     : Promise.resolve(null)
   const wsPromise = cwd !== undefined && cwd.length > 0
-    ? snapshotWorkspace(subprocess, root, cwd, buildWorkspaceMessage(meta))
+    ? snapshotWorkspace(subprocess, root, sessionId, cwd, buildWorkspaceMessage(meta))
     : Promise.resolve({ ok: true } as WorkspaceSnapshotResult)
 
   const [ws, baseBlob, rootTreeSha] = await Promise.all([wsPromise, baseBlobPromise, rootTreePromise])

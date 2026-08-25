@@ -202,3 +202,43 @@ export async function manualSnapshot(sessionId: string): Promise<SnapshotResult>
     ...(typeof data.turn === 'number' ? { turn: data.turn } : {}),
   }
 }
+
+/** Host git availability (plugin config card). */
+export interface GitStatusResult {
+  ok: boolean
+  available: boolean
+  version?: string
+  message?: string
+}
+
+/** Query whether git is available on the host. */
+export async function gitStatus(): Promise<GitStatusResult> {
+  const data = await get(`${ROUTE_PREFIX}/git-status`)
+  if (data === null) return { ok: false, available: false }
+  return {
+    ok: data.ok === true,
+    available: data.available === true,
+    ...(typeof data.version === 'string' ? { version: data.version } : {}),
+    ...(typeof data.message === 'string' ? { message: data.message } : {}),
+  }
+}
+
+/** Install-git attempt result (plugin config card). */
+export interface InstallGitResult {
+  ok: boolean
+  installed?: boolean
+  detail?: string
+  message?: string
+}
+
+/** Ask the host to attempt a silent git install. */
+export async function installGit(): Promise<InstallGitResult> {
+  const data = await post(`${ROUTE_PREFIX}/install-git`, {})
+  if (data === null) return { ok: false, message: 'transport' }
+  return {
+    ok: data.ok === true,
+    ...(data.installed === true ? { installed: true } : {}),
+    ...(typeof data.detail === 'string' ? { detail: data.detail } : {}),
+    ...(typeof data.message === 'string' ? { message: data.message } : {}),
+  }
+}

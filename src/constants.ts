@@ -63,3 +63,15 @@ export const MESSAGE_PREFIX = 'dsh-history:'
 
 /** git log format used by the timeline data source. */
 export const LOG_FORMAT = '%H|%P|%s|%ct'
+
+/** Settings namespace owned by this plugin (lowercase kebab-case per the seam). */
+export const SETTINGS_NAMESPACE = 'history-rewind'
+
+/** Durable config value shape (mirrors the Host schema). */
+export interface HistoryRewindConfig {
+  /** Whether session history rewind is enabled. */
+  enabled: boolean
+}
+
+/** Schema defaults. */
+export const HISTORY_REWIND_DEFAULTS: HistoryRewindConfig = { enabled: true }

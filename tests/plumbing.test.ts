@@ -39,7 +39,7 @@ test('workspace snapshot: plumbing walk skips .git and excluded dirs', async () 
   await writeFile(join(cwd, 'sub', '.git', 'HEAD'), 'ignored')
   await writeFile(join(cwd, 'run.sh'), 'echo hi', { mode: 0o755 })
 
-  const result = await snapshotWorkspace(subprocess, historyRoot, cwd, 'dsh-history: turn 1 start (seq 3) session-s1 snap=turn-1-start-3')
+  const result = await snapshotWorkspace(subprocess, historyRoot, 's1', cwd, 'dsh-history: turn 1 start (seq 3) session-s1 snap=turn-1-start-3')
   assert.equal(result.ok, true)
   assert.ok(result.commit)
 
@@ -347,7 +347,7 @@ test('timeline parse: road fork shape', async () => {
   const fork = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-start', seq: 6 })
   assert.equal(fork.fork, true)
 
-  const rows = await timelineRows(subprocess, repoDir, root)
+  const rows = await timelineRows(subprocess, repoDir, sessionId, root)
   assert.ok(rows !== null)
   const bySha = new Map(rows.map((r) => [r.sha, r]))
   assert.equal(bySha.get(fork.commit!)?.parents[0], a.commit) // road forks from A

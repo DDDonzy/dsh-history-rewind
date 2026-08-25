@@ -47,8 +47,26 @@ export function sessionRepoDir(root: string, sessionId: string): string {
   return join(root, REPOS_DIRNAME, `session-${sessionId}.git`)
 }
 
-/** Per-project bare repo: $DSH_HOME/.dsh-history/repos-ws/<project>.git. */
-export function workspaceRepoDir(root: string, cwd: string): string {
+/** Filesystem-safe directory segment for a session id (keep \w / . / -). */
+function sessionSegment(sessionId: string): string {
+  return sessionId.replace(/[^\w.-]/g, '_')
+}
+
+/**
+ * Per-session workspace bare repo: $DSH_HOME/.dsh-history/repos-ws/session-<id>.git.
+ * Each session owns its workspace history, so two sessions sharing one
+ * workspace directory each get their own BASELINEs and file-version chain.
+ */
+export function workspaceRepoDir(root: string, sessionId: string): string {
+  return join(root, REPOS_WS_DIRNAME, `session-${sessionSegment(sessionId)}.git`)
+}
+
+/**
+ * Legacy per-project workspace bare repo (pre session-scoped storage): kept
+ * for reading old snapshots whose ws commits live there. Timeline enrichment
+ * and rewind fall back to it when the per-session repo lacks a commit.
+ */
+export function legacyWorkspaceRepoDir(root: string, cwd: string): string {
   return join(root, REPOS_WS_DIRNAME, `${projectSegment(cwd)}.git`)
 }
 
@@ -57,9 +75,9 @@ export function sessionBackupDir(root: string, sessionId: string): string {
   return join(root, BACKUPS_DIRNAME, `session-${sessionId}`)
 }
 
-/** Pre-rewind backup root for one workspace: backups/ws-<project>/. */
-export function workspaceBackupDir(root: string, cwd: string): string {
-  return join(root, BACKUPS_DIRNAME, `ws-${projectSegment(cwd)}`)
+/** Pre-rewind backup root for one session's workspace: backups/ws-session-<id>/. */
+export function workspaceBackupDir(root: string, sessionId: string): string {
+  return join(root, BACKUPS_DIRNAME, `ws-session-${sessionSegment(sessionId)}`)
 }
 
 /**
@@ -167,15 +185,15 @@ export async function acquireLock(root: string, key: string, waitMs = 8000): Pro
 }
 
 /**
- * Read the workspace exclude list of one repo: the bare repo's info/exclude
- * if present, else the shipped defaults. Snapshotting merges the shipped
- * defaults with the file so removing a default requires an explicit rule.
+ * Read the workspace exclude list of one session's repo: the bare repo's
+ * info/exclude if present, else the shipped defaults. Snapshotting merges the
+ * shipped defaults with the file so removing a default requires an explicit rule.
  * @param root - history root (resolves the repo dir).
- * @param cwd - the workspace path (resolves the repo).
+ * @param sessionId - the session whose workspace repo owns the excludes.
  * @returns exclude basename patterns (".git" always first).
  */
-export async function readExcludes(root: string, cwd: string): Promise<string[]> {
-  const repoDir = workspaceRepoDir(root, cwd)
+export async function readExcludes(root: string, sessionId: string): Promise<string[]> {
+  const repoDir = workspaceRepoDir(root, sessionId)
   const excludePath = join(repoDir, 'info', 'exclude')
   let lines: string[] = []
   try {
@@ -191,13 +209,13 @@ export async function readExcludes(root: string, cwd: string): Promise<string[]>
 }
 
 /**
- * Write the default exclude list into a fresh bare repo so the user can
+ * Write the default exclude list into a fresh session repo so the user can
  * adjust it (git's own info/exclude semantics, our file owns it).
  * @param root - history root.
- * @param cwd - the workspace path.
+ * @param sessionId - the session whose workspace repo owns the excludes.
  */
-export async function ensureExcludes(root: string, cwd: string): Promise<void> {
-  const repoDir = workspaceRepoDir(root, cwd)
+export async function ensureExcludes(root: string, sessionId: string): Promise<void> {
+  const repoDir = workspaceRepoDir(root, sessionId)
   const excludePath = join(repoDir, 'info', 'exclude')
   if (existsSync(excludePath)) return
   try {

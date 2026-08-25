@@ -14,7 +14,8 @@ import type { SubprocessLike } from './git-runner.ts'
 import { runGit } from './git-runner.ts'
 import { argvLogAll, type ShadowRepo } from './git-commands.ts'
 import { parseMessage, type SnapMeta } from './messages.ts'
-import { workspaceRepoDir } from './store.ts'
+import { workspaceRepoDir, legacyWorkspaceRepoDir } from './store.ts'
+import { existsSync } from 'node:fs'
 
 /** One timeline row (owned JSON, leaf scalars only). */
 export interface TimelineRow {
@@ -51,6 +52,7 @@ function wsFilesByCommit(stdout: string): Map<string, string[]> {
 export async function timelineRows(
   subprocess: SubprocessLike,
   repoDir: string,
+  sessionId: string,
   root: string,
   workspaceCwd?: string | null,
 ): Promise<TimelineRow[] | null> {
@@ -75,21 +77,47 @@ export async function timelineRows(
   // paired workspace snapshot. ONE spawn: `git log --name-only` walks main
   // (linear) and prints every commit's file list; we key by ws commit sha.
   if (workspaceCwd !== undefined && workspaceCwd !== null && workspaceCwd.length > 0) {
-    const wsRepo: ShadowRepo = { gitDir: workspaceRepoDir(root, workspaceCwd) }
-    const log = await runGit(
+    // 会话级 ws 仓库优先；旧的项目级仓库（老快照的 ws commit 所在）合并进来，
+    // 保证旧时间线仍能解析文件列表。
+    const byCommit = new Map<string, string[]>()
+    const mergeFiles = (part: Map<string, string[]>): void => {
+      for (const [sha, files] of part) if (!byCommit.has(sha)) byCommit.set(sha, files)
+    }
+    const newRepo = workspaceRepoDir(root, sessionId)
+    const logNew = await runGit(
       subprocess,
-      ['git', `--git-dir=${wsRepo.gitDir}`, 'log', '--root', '--name-only', '--format=commit %H', 'refs/heads/main'],
+      ['git', `--git-dir=${newRepo}`, 'log', '--root', '--name-only', '--format=commit %H', 'refs/heads/main'],
       root,
     )
-    if (log.exitCode === 0) {
-      const byCommit = wsFilesByCommit(log.stdout)
-      for (const row of rows) {
+    if (logNew.exitCode === 0) mergeFiles(wsFilesByCommit(logNew.stdout))
+    const legacyRepo = legacyWorkspaceRepoDir(root, workspaceCwd)
+    if (legacyRepo !== newRepo && existsSync(legacyRepo)) {
+      const logOld = await runGit(
+        subprocess,
+        ['git', `--git-dir=${legacyRepo}`, 'log', '--root', '--name-only', '--format=commit %H', 'refs/heads/main'],
+        root,
+      )
+      if (logOld.exitCode === 0) mergeFiles(wsFilesByCommit(logOld.stdout))
+    }
+    if (byCommit.size > 0) {
+      // rows 来自 `git log --all --topo-order`（newest-first）。一个 ws
+      // commit 可能被多个连续快照复用（工作区未变化时 dedup 复用），它们
+      // 相对 parent 的变更集是同一份。只有"首次到达该工作区状态"的快照才
+      // 真正修改了文件：按旧→新遍历，用 seen 集合只对首次出现的 ws commit
+      // 挂文件列表，其余保持无文件，避免连续无变动快照重复显示同一批文件。
+      const seenWs = new Set<string>()
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i]!
         const meta = row.meta
         if (meta === null || (meta.kind !== 'turn-start' && meta.kind !== 'turn-end')) continue
         const ws = meta.ws
         if (ws === undefined || ws.length === 0) continue
+        if (seenWs.has(ws)) continue
         const files = byCommit.get(ws)
-        if (files !== undefined && files.length > 0) row.files = files
+        if (files !== undefined && files.length > 0) {
+          row.files = files
+          seenWs.add(ws)
+        }
       }
     }
   }

@@ -13,7 +13,7 @@
  */
 
 import { readFile } from 'node:fs/promises'
-import { zstdDecompressSync } from 'node:zlib'
+import { zstdDecompressSync, zstdCompressSync } from 'node:zlib'
 
 const ZSTD_MAGIC = 0xfd2fb528
 
@@ -302,4 +302,52 @@ export function semanticallyEqual(current: SessionEventLite[], base: SessionEven
     return false
   }
   return j === base.length
+}
+
+/**
+ * Append a bare EMPTY turn pair (`turn/start` → `turn/end`, no messages) as a
+ * NEW zstd frame, ALWAYS. Every BASELINE (turn-start) snapshot carries its own
+ * turn/start, so ANY snapshot is a valid non-blank conversation state: DSH's
+ * `sessionBlank` check passes for every backup point without having to know
+ * whether it was the first message. The empty turn contributes no message to
+ * the model (an empty turn projects no surface content).
+ * @param bytes - the artifact bytes to extend.
+ * @returns the extended bytes (unchanged when the format is unreadable).
+ */
+export function appendEmptyTurn(bytes: Buffer): Buffer {
+  try {
+    const events = decodeSessionEventsFromBytes(bytes)
+    // Existing event seqs are 0-based and contiguous; new events follow on.
+    const baseSeq = events.length > 0 ? events[events.length - 1]!.seq + 1 : 0
+    const now = Date.now()
+    const seedLines = [
+      JSON.stringify({ type: 'turn/start', seq: baseSeq, time: now, data: { turn: 1 } }),
+      JSON.stringify({ type: 'turn/end', seq: baseSeq + 1, time: now, data: { turn: 1, reason: { kind: 'completed' } } }),
+    ]
+    const frame = zstdCompressSync(Buffer.from(seedLines.join('\n') + '\n', 'utf8'))
+    return Buffer.concat([bytes, frame])
+  } catch {
+    return bytes
+  }
+}
+
+/**
+ * Blank-session fix (mirrors dsh-session-tree's seed trick): DSH's
+ * `sessionBlank` treats a log with NO `turn/start` as a brand-new session —
+ * the hero page, hidden from lists, reused by New Session. Rewinding onto
+ * such a pre-send empty state would therefore blank the chat window. When the
+ * target really has no `turn/start`, append a bare empty turn pair (see
+ * `appendEmptyTurn`); targets that already carry one are left untouched.
+ * @param bytes - the target artifact bytes (multi-frame zstd JSONL).
+ * @returns the possibly-extended bytes (original when no seeding is needed).
+ */
+export function seedBlankSession(bytes: Buffer): Buffer {
+  try {
+    const events = decodeSessionEventsFromBytes(bytes)
+    if (events.some((event) => event.type === 'turn/start')) return bytes
+    return appendEmptyTurn(bytes)
+  } catch {
+    // Unreadable/unexpected format: leave the bytes as they are.
+    return bytes
+  }
 }

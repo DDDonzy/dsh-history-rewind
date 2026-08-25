@@ -7,8 +7,15 @@
  *   - 内容变化 → 新建 road-<ts> 分支，提交（父 = 跳转目标），main 原路不动。
  *
  * Chain (order contract):
- *   materialize target bytes → flush → backup → detach agent entry → detach
- *   session entry → atomic replace → optional workspace restore → resume.
+ *   materialize target bytes → flush → backup → workspace resolve/backup/restore
+ *   → detach agent entry → detach session entry → atomic replace → resume.
+ *
+ * The workspace RESTORE runs while the session is still live (before any
+ * detach): it is the slow part of a rewind, and the client shows one
+ * no-session gap between `session/disposed` and `session/created` (the list
+ * drops and re-adds the row). Running it first keeps that gap down to the
+ * atomic rename + resume — the UI can never flash for the duration of a large
+ * workspace walk.
  *
  * Crash semantics:
  *   - crash before resume → disk file = target content, git untouched (main
@@ -28,10 +35,10 @@ import {
   argvRevParseCommit, argvLogSubjects, commitEnv, type ShadowRepo,
 } from './git-commands.ts'
 import { parseMessage } from './messages.ts'
-import { sessionRepoDir, workspaceRepoDir, sessionBackupDir, ensureBareRepo, ensureHistoryRoot } from './store.ts'
+import { sessionRepoDir, workspaceRepoDir, legacyWorkspaceRepoDir, sessionBackupDir, ensureBareRepo, ensureHistoryRoot } from './store.ts'
 import { materializeTree, backupWorkspace } from './workspace.ts'
 import { setJumpTarget } from './state.ts'
-import { decodeTargetFacts } from './zstd-util.ts'
+import { decodeTargetFacts, seedBlankSession } from './zstd-util.ts'
 import type { SessionLike, PersistenceLike } from './snapshot.ts'
 
 /** Minimal structural view of one live agent. */
@@ -129,6 +136,29 @@ async function resolveWorkspaceCommit(
 }
 
 /**
+ * Resolve the workspace repo that actually contains `wsCommit`: the session's
+ * own repo first, then the legacy per-project repo (old snapshots whose ws
+ * commits live there). Returns the git dir, or null when neither carries it.
+ */
+async function wsRepoWithCommit(
+  subprocess: SubprocessLike,
+  root: string,
+  sessionId: string,
+  wsCommit: string,
+  cwd: string,
+  env: Record<string, string>,
+): Promise<string | null> {
+  const primary = workspaceRepoDir(root, sessionId)
+  const first = await runGit(subprocess, argvRevParseCommit({ gitDir: primary }, wsCommit), root, env)
+  if (first.exitCode === 0 && firstLine(first.stdout).length > 0) return primary
+  const legacy = legacyWorkspaceRepoDir(root, cwd)
+  if (legacy === primary || !existsSync(legacy)) return null
+  const second = await runGit(subprocess, argvRevParseCommit({ gitDir: legacy }, wsCommit), root, env)
+  if (second.exitCode === 0 && firstLine(second.stdout).length > 0) return legacy
+  return null
+}
+
+/**
  * Perform one rewind (checkout-only). Single-flight per session (callers gate it).
  * @param subprocess - the subprocess service.
  * @param root - history root.
@@ -177,14 +207,13 @@ export async function rewindSession(
     if (cwdWs === undefined || cwdWs.length === 0) return { ok: false, reason: 'no-workspace' }
     const wsCommit = await resolveWorkspaceCommit(subprocess, sessionRepo, target, root)
     if (wsCommit === null) return { ok: false, reason: 'no-workspace-snapshot', target }
-    const wsRepo: ShadowRepo = { gitDir: workspaceRepoDir(root, cwdWs) }
-    const wsVerify = await runGit(subprocess, argvRevParseCommit(wsRepo, wsCommit), root, env)
-    if (wsVerify.exitCode !== 0 || firstLine(wsVerify.stdout).length === 0) {
+    const wsGit = await wsRepoWithCommit(subprocess, root, sessionId, wsCommit, cwdWs, env)
+    if (wsGit === null) {
       return { ok: false, reason: 'no-workspace-snapshot', target }
     }
-    const backed = await backupWorkspace(root, cwdWs)
+    const backed = await backupWorkspace(root, sessionId, cwdWs)
     if (backed === null) return { ok: false, reason: 'workspace-backup-failed' }
-    const restored = await materializeTree(subprocess, wsRepo.gitDir, wsCommit, cwdWs)
+    const restored = await materializeTree(subprocess, wsGit, wsCommit, cwdWs)
     return {
       ok: restored !== null,
       target,
@@ -232,26 +261,31 @@ export async function rewindSession(
     return { ok: false, reason: 'backup-failed' }
   }
 
-  // 3. Workspace chain — RESOLVE + BACKUP before anything detaches (hard
-  //    guard: no backup, no destructive move). Restore runs after the session
-  //    file replace, while the session is detached.
+  // 3. Workspace chain — RESOLVE + BACKUP + RESTORE before anything detaches
+  //    (hard guard: no backup, no destructive move; and the restore is slow,
+  //    so it must not sit inside the session's dispose → resume gap where the
+  //    browser shows the no-session state).
   let wsCommit: string | null = null
   const cwd = session.header.cwd
   let noWorkspaceSnapshot = false
+  let workspaceRestored = false
   if (restoreWorkspace && cwd !== undefined && cwd.length > 0) {
     wsCommit = await resolveWorkspaceCommit(subprocess, sessionRepo, target, root)
     if (wsCommit === null) {
       noWorkspaceSnapshot = true
     } else {
-      const wsRepo: ShadowRepo = { gitDir: workspaceRepoDir(root, cwd) }
-      const wsVerify = await runGit(subprocess, argvRevParseCommit(wsRepo, wsCommit), root, env)
-      if (wsVerify.exitCode === 0 && firstLine(wsVerify.stdout).length > 0) {
-        const backed = await backupWorkspace(root, cwd)
+      const wsGit = await wsRepoWithCommit(subprocess, root, sessionId, wsCommit, cwd, env)
+      if (wsGit !== null) {
+        const backed = await backupWorkspace(root, sessionId, cwd)
         if (backed === null) {
           await rm(scratch, { recursive: true, force: true }).catch(() => undefined)
           return { ok: false, reason: 'workspace-backup-failed' }
         }
         backup.workspace = backed
+        // Restore now (session still live): only the atomic session-file
+        // rename and the resume remain inside the dispose → resume gap.
+        const restored = await materializeTree(subprocess, wsGit, wsCommit, cwd)
+        workspaceRestored = restored !== null
       } else {
         wsCommit = null
       }
@@ -280,29 +314,31 @@ export async function rewindSession(
 
   // 5. Atomic replace of the official file (temp in the same dir + rename;
   //    node:fs, never subprocess stdout). main untouched, no new objects.
-  //    The target bytes are kept for the composition read in step 7.
+  //    The target bytes are kept for the composition read in step 6.
   const dir = dirname(location.path)
   const tempPath = join(dir, `session.jsonl.zstd.tmp-${Date.now()}`)
   let targetBytes: Buffer | null = null
   try {
     targetBytes = await readFile(targetFile!)
+    // Empty-session repair: a target with no turn/start would render as a
+    // brand-new hero window (DSH `sessionBlank`). Seed a bare empty turn pair
+    // so the window stays a live session while the model sees no content.
+    targetBytes = seedBlankSession(targetBytes)
     await writeFile(tempPath, targetBytes)
     await rename(tempPath, location.path)
   } catch (error) {
     await unlink(tempPath).catch(() => undefined)
     await rm(scratch, { recursive: true, force: true }).catch(() => undefined)
-    return { ok: false, reason: 'replace-failed', error: error instanceof Error ? error.message : String(error) }
+    return {
+      ok: false,
+      reason: 'replace-failed',
+      error: error instanceof Error ? error.message : String(error),
+      ...(backup.session !== undefined ? { backup } : {}),
+      ...(workspaceRestored ? { workspaceRestored: true } : {}),
+    }
   }
 
-  // 6. Workspace restore (session still detached; its own failure is reported
-  //    but the session rewind stands).
-  let workspaceRestored = false
-  if (wsCommit !== null) {
-    const restored = await materializeTree(subprocess, workspaceRepoDir(root, cwd!), wsCommit, cwd!)
-    workspaceRestored = restored !== null
-  }
-
-  // 7. Official loader: prepare + publish a new live session from disk.
+  // 6. Official loader: prepare + publish a new live session from disk.
   //    Cache contract: the resumed loop rebuilds its request prefix from the
   //    CURRENT envelope, so the resume must re-compose the agent the same way
   //    the deployment's cold resume does — mount the agent preset the target
@@ -389,7 +425,7 @@ export async function rewindSession(
     return outcome
   }
 
-  // 8. Checkout semantics: the jump target is remembered (in-process) so the
+  // 7. Checkout semantics: the jump target is remembered (in-process) so the
   //    NEXT snapshot diffs against it — identical content produces nothing,
   //    changed content forks a road with parent = this target.
   setJumpTarget(sessionId, target)

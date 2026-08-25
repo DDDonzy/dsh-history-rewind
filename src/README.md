@@ -110,9 +110,11 @@ $DSH_HOME/.dsh-history-rewind/
 │                                 #   → commit-tree（父 = base）→ 推进 ref
 │                                 #   refs：main=原始路（永不移动）
 │                                 #         road-<ts>=跳转后内容变化的新路
-├── repos-ws/<project>.git        # 工作区影子仓库（bare，plumbing 遍历快照）
-│                                 #   按 project 隔离，消息带 session=<id> 归因
-│                                 #   多会话共享同一 cwd 时加排他锁
+├── repos-ws/session-<uuid>.git   # 会话级工作区影子仓库（bare，plumbing 遍历快照）
+│                                 #   按会话隔离：同一工作区的不同会话各有独立
+│                                 #   的文件版本链与 BASELINE 锚点
+│                                 #   兼容：旧 repos-ws/<project>.git 在读取时
+│                                 #   作为回退（老快照的 ws commit 仍可解析）
 └── backups/                      # 回退前备份（会话物理文件 + 工作区状态）
 ```
 
@@ -166,12 +168,31 @@ $DSH_HOME/.dsh-history-rewind/
 2. git show 目标版本会话文件字节
 3. 备份当前物理文件 → backups/
 4. flush（durability 屏障）
-5. detach agent（agents.detachEntered）
-6. detach session（sessions.detachEntered → session/disposed → 游标退休）
-7. 原子替换官方物理文件（同目录临时文件 + rename，node:fs）
-8. agents.resume({ resumeSessionId }) 并恢复目标记录的信封
+5. 工作区配对提交：解析 ws= → 备份 → 恢复（**在 detach 之前**：
+   恢复是耗时步骤，留在 detach → resume 间隙内会让浏览器长时间
+   处于无会话状态；先恢复则间隙只剩原子替换 + resume）
+6. detach agent（agents.detachEntered）
+7. detach session（sessions.detachEntered → session/disposed → 游标退休）
+8. 原子替换官方物理文件（同目录临时文件 + rename，node:fs）
+9. agents.resume({ resumeSessionId }) 并恢复目标记录的信封
    （agent preset 重新 mount + provider/model 路由，保前缀缓存契约）
-9. 前端重建视图（rebindView 链；异常降级整页刷新）
+10. 前端：确认跳转后 HISTORY 面板**立即关闭**，回退在后台执行；完成后
+    rebindView 原位刷新（优先调用会话实例的 resync()：窗口原地重拉，
+    不销毁 scope、不清空选择、不经过无会话 hero；同时清除实例残留的
+    `removed` 标志——host/session-removed 置位后运行时从不复位，
+    不清除会把 composer 永久锁成「会话不可用」；仅当运行时不支持时
+    降级为 scope 重建 + 整页刷新）；失败则重开面板并显示原因。
+
+**前端提交流程**：
+- **回档弹窗**（选择版本后确认）经 `createPortal` 渲染到插件自己的 root，
+  history 面板卡片随之隐藏（`display: none`，DOM 与状态保留）——弹窗单独
+  悬浮在页面上，取消即原样恢复；Esc 先取消弹窗，再按一次才关面板；
+- 确认后面板立即关闭，客户端临时**拦截该会话的 `host/session-removed`**，
+  防止 `current` 瞬时变 `undefined` 导致会话区切到初始空页面；
+- 页面显示**毛玻璃遮罩**（blur 8px + rgba 0.45）+ 居中状态卡片（转圈 →
+  「正在回退 / 正在刷新会话」+ 目标 commit），成功变 ✓ 后 0.4s 平滑上浮淡出
+  揭示已切换好的会话内容（`done → fading → idle`，全程会话区保持在对话视图上，
+  零空页面闪烁，零二次跳跃）。
 ```
 
 **工作区回退链路**：解析目标 commit 的 `ws=` 配对 → 备份当前工作区 → `read-tree` + `checkout-index`（临时 index，git 直接写文件，二进制安全）恢复。**不做 `git clean`**（新增文件保留，避免误删）。

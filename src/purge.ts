@@ -106,14 +106,14 @@ export async function purgeSession(
     result.sessionPruned = await pruneRepo(subprocess, sessionGit, root)
   }
   if (cwd !== undefined && cwd.length > 0) {
-    const wsGit = workspaceRepoDir(root, cwd)
+    const wsGit = workspaceRepoDir(root, sessionId)
     if (await ensureBareRepo(subprocess, wsGit)) {
       result.workspaceRefs = await removeForkRefs(subprocess, wsGit, root)
       result.workspacePruned = await pruneRepo(subprocess, wsGit, root)
     }
   }
   const sessionDeleted = await rotateBackups(sessionBackupDir(root, sessionId), keepBackups)
-  const wsDeleted = cwd !== undefined && cwd.length > 0 ? await rotateBackups(workspaceBackupDir(root, cwd), keepBackups) : 0
+  const wsDeleted = cwd !== undefined && cwd.length > 0 ? await rotateBackups(workspaceBackupDir(root, sessionId), keepBackups) : 0
   result.backupsDeleted = sessionDeleted + wsDeleted
   result.ok = true
   return result

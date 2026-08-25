@@ -140,7 +140,7 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         // Workspace cwd drives the paired ws-snapshot diff for CHECK POINT rows.
         const session = engine.sessions?.get(sessionId)
         const workspaceCwd = session?.header?.cwd ?? null
-        const rows = await timelineRows(engine.subprocess, repoDir, engine.root, workspaceCwd)
+        const rows = await timelineRows(engine.subprocess, repoDir, sessionId, engine.root, workspaceCwd)
         if (rows === null) json(res, 200, { ok: false, reason: 'git-unavailable' })
         else json(res, 200, { ok: true, rows })
         return
@@ -188,8 +188,20 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
+      // GET /git-status — host git availability (plugin config card).
+      if (pathname === `${ROUTE_PREFIX}/git-status` && method === 'GET') {
+        json(res, 200, await detectGit(engine.subprocess, engine.root))
+        return
+      }
+
       if (method !== 'POST') {
         json(res, 404, { ok: false, reason: 'not-found' })
+        return
+      }
+
+      // POST /install-git — try a silent install (plugin config card action).
+      if (pathname === `${ROUTE_PREFIX}/install-git`) {
+        json(res, 200, await installGit(engine.subprocess, engine.root))
         return
       }
 
@@ -279,6 +291,57 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
       })
     }
+  }
+}
+
+/** Detect whether git is available on the host PATH (plugin config card). */
+async function detectGit(subprocess: SubprocessLike, cwd: string): Promise<{ ok: boolean; available: boolean; version?: string; message?: string }> {
+  try {
+    const res = await runGit(subprocess, ['git', '--version'], cwd)
+    if (res.exitCode === 0) {
+      const version = firstLine(res.stdout)
+      return { ok: true, available: true, ...(version.length > 0 ? { version } : {}) }
+    }
+    return { ok: true, available: false, message: res.stderr.trim() || 'git 未安装' }
+  } catch (error) {
+    return { ok: true, available: false, message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Attempt a silent Git install via winget. A system-level install can be
+ * blocked by the sandbox or need elevation; the caller surfaces detail and
+ * manual-install guidance. Note: the running DSH process PATH is fixed, so a
+ * newly installed git becomes visible only after a DSH restart.
+ */
+async function installGit(subprocess: SubprocessLike, cwd: string): Promise<{ ok: boolean; installed?: boolean; detail?: string; message: string }> {
+  try {
+    const handle = subprocess.spawn({
+      argv: ['winget', 'install', '--id', 'Git.Git', '-e', '--silent', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'],
+      cwd,
+      stdio: {
+        stdin: 'ignore',
+        stdout: { maxBytes: 200_000 },
+        stderr: { maxBytes: 200_000 },
+      },
+      graceMs: 600_000,
+    })
+    const outcome = await handle.done
+    const out = handle.collected.stdout?.readFrom(0).text ?? ''
+    const err = handle.collected.stderr?.readFrom(0).text ?? ''
+    const ok = outcome.exitCode === 0
+    const detail = `${out}\n${err}`.trim().slice(0, 2000)
+    return {
+      ok,
+      ...(ok ? { installed: true } : {}),
+      ...(detail.length > 0 ? { detail } : {}),
+      message: ok
+        ? '已安装 Git。宿主进程的 PATH 不会动态更新，请重启 DSH 后生效。'
+        : '自动安装失败，请查看 detail，或手动安装：https://git-scm.com/download/win',
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    return { ok: false, message: `无法自动安装 Git（${msg}）。请手动安装：https://git-scm.com/download/win` }
   }
 }
 
