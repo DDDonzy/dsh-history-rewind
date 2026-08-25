@@ -181,6 +181,12 @@ export const STYLES = [
   '  display: flex;',
   '  flex-direction: column;',
   '}',
+  /* Vertically center a SHORT timeline list inside the panel. Applied by JS
+     only while the content fits the viewport (justify-content:center on an
+     overflowing flex scrollport would clip the top and break scrolling). */
+  '.dsh-history-modal-body-center {',
+  '  justify-content: center;',
+  '}',
   '.dsh-history-modal-body::-webkit-scrollbar {',
   '  width: 8px;',
   '}',
@@ -748,6 +754,7 @@ export const MODAL_BACKDROP = 'dsh-history-modal-backdrop'
 export const MODAL_CARD = 'dsh-history-modal-card'
 export const MODAL_HEAD = 'dsh-history-modal-head'
 export const MODAL_BODY = 'dsh-history-modal-body'
+export const MODAL_BODY_CENTER = 'dsh-history-modal-body-center'
 export const MODAL_FOOT = 'dsh-history-modal-foot'
 export const GRAPH_CELL = 'dsh-history-graph-cell'
 export const PROGRESS_MASK = 'dsh-history-progress-mask'

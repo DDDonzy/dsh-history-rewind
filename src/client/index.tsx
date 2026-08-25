@@ -44,6 +44,7 @@ import {
   MODAL_BACKDROP,
   MODAL_CARD,
   MODAL_BODY,
+  MODAL_BODY_CENTER,
   GRAPH_CELL,
   PROGRESS_MASK,
   PROGRESS_CARD,
@@ -698,6 +699,23 @@ function HistoryPanel(props: {
     anchor.current = { sha: '', top: 0 }
   }, [winStart])
 
+  // Vertically center a SHORT list inside the panel. Only while the content
+  // actually fits the viewport — centering an overflowing scrollport would
+  // clip the top rows unreachably. Re-measured on every layout-affecting
+  // change (window slice, measured row heights, new timeline) and on resize.
+  const [centered, setCentered] = useState(false)
+  useLayoutEffect(() => {
+    const el = listRef.current
+    if (el === null) return
+    const measure = (): void => {
+      setCentered(el.scrollHeight <= el.clientHeight + 1)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [rows, winStart, rowHeights])
+
   // Ancestor path of the hovered row (itself + all parents up to the root):
   // every node and rail on this path highlights blue during hover.
   const hoverPath = useMemo(() => {
@@ -796,7 +814,7 @@ function HistoryPanel(props: {
   return createElement('div', { className: PANEL },
     // Scrollable Flat Timeline List (Trajectory style), windowed ±20 around HEAD
     createElement('div', {
-      className: MODAL_BODY,
+      className: centered ? `${MODAL_BODY} ${MODAL_BODY_CENTER}` : MODAL_BODY,
       ref: (node: HTMLDivElement | null): void => { listRef.current = node },
       onScroll,
     },
