@@ -380,6 +380,7 @@ tries[1] = agents.resume({ resumeSessionId, agentOptions: { provider, model } })
 
 ---
 
-## 许可证
+## 说明
 
-MIT
+个人自用小工具，随意使用与修改，无质保～
+
