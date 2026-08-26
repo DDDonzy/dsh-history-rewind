@@ -89,11 +89,11 @@ export function preTurnPrefixLength(bytes: Buffer): number {
   return cut
 }
 
-/** Latest human/assistant message text found in one artifact (for commit previews). */
+/** Human/assistant message text found in one artifact (for commit previews). */
 export interface MessagePreviews {
-  /** Last genuine user message (source.kind === 'user'; injected context excluded). */
+  /** Genuine user message (source.kind === 'user'; injected context excluded). */
   user?: string
-  /** Last assistant message. */
+  /** Assistant message. */
   assistant?: string
 }
 
@@ -110,26 +110,59 @@ function textOf(content: unknown): string {
   return parts.join(' ')
 }
 
+/** One parsed event line, kept in artifact (chronological) order. */
+interface ParsedLine {
+  type: string
+  seq: number
+  data: Record<string, unknown> | undefined
+}
+
 /**
- * Extract the latest user and assistant message text from an artifact.
+ * Extract the user and assistant message text of ONE COMPLETED TURN.
  *
- * Frames are scanned NEWEST-first and decompressed only until both previews
- * are found (turn boundaries sit at the tail), so a multi-MB history costs a
- * couple of frame decodes, not a full decompress. A corrupt tail is tolerated
- * (returns whatever was found). Injected context (source.kind !== 'user') is
- * never treated as a user message.
+ * Turn-bounded on purpose. The previous implementation took the newest
+ * `user/message` and the newest `assistant/message` independently, with no check
+ * that the two belonged to the same turn. That is a real data-corruption race:
+ * sending the next message exactly as a turn ends makes the artifact grow before
+ * the capture reads it (the capture even flushes it to disk first), so the commit
+ * for turn N could be stamped with turn N's assistant reply next to turn N+1's
+ * user message — a question paired with the answer to a different question, and
+ * turn N's real question lost from the timeline entirely. Commit messages are
+ * immutable, so a wrong pairing is permanent.
+ *
+ * Correctness therefore cannot rest on timing (no amount of locking closes the
+ * window — the next message may already be buffered before the turn/end event is
+ * even dispatched). It rests on the data: previews are only read from BETWEEN a
+ * `turn/start` and its paired `turn/end`, and anything after that boundary is
+ * ignored no matter how fast it arrived.
+ *
+ * When `endSeq` is given, the turn closed by exactly that `turn/end` event is
+ * selected — the caller knows which boundary it is snapshotting, so the turn is
+ * identified rather than inferred. Without it, the last completed turn is used.
+ *
+ * If the boundary cannot be resolved, NOTHING is returned rather than falling
+ * back to the newest-message guess: omitting a preview line is recoverable,
+ * writing a wrong pairing into an immutable commit is not.
+ *
+ * Frames are scanned NEWEST-first and decompressed only until the turn is fully
+ * covered (turn boundaries sit at the tail), so a multi-MB history costs a couple
+ * of frame decodes, not a full decompress. A corrupt tail is tolerated.
+ *
  * @param bytes - raw artifact bytes.
- * @returns the newest user/assistant previews (fields absent when not found).
+ * @param endSeq - seq of the `turn/end` event being snapshotted, when known.
+ * @returns the previews of that one turn (fields absent when not resolvable).
  */
-export function extractMessagePreviews(bytes: Buffer): MessagePreviews {
+export function extractMessagePreviews(bytes: Buffer, endSeq?: number): MessagePreviews {
   let frames: FrameRange[]
   try {
     frames = scanZstdFrames(bytes)
   } catch {
     return {}
   }
-  let user: string | undefined
-  let assistant: string | undefined
+
+  // Accumulate lines newest-frame-first, but keep each frame's lines in
+  // chronological order so the buffer reads forward once a turn is covered.
+  const lines: ParsedLine[] = []
   for (let f = frames.length - 1; f >= 0; f -= 1) {
     const frame = frames[f]!
     let plaintext: string
@@ -138,30 +171,72 @@ export function extractMessagePreviews(bytes: Buffer): MessagePreviews {
     } catch {
       continue
     }
-    const lines = plaintext.split('\n')
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const text = lines[i]!.trim()
+    const parsedFrame: ParsedLine[] = []
+    for (const raw of plaintext.split('\n')) {
+      const text = raw.trim()
       if (text.length === 0) continue
-      let parsed: { type?: unknown; data?: Record<string, unknown> }
+      let parsed: { type?: unknown; seq?: unknown; data?: Record<string, unknown> }
       try {
         parsed = JSON.parse(text) as typeof parsed
       } catch {
         continue
       }
-      const data = parsed.data
-      if (assistant === undefined && parsed.type === 'assistant/message' && data !== undefined) {
-        const message = data.message as { content?: unknown } | undefined
-        const content = message?.content ?? (data as { content?: unknown }).content
-        const value = textOf(content)
-        if (value.length > 0) assistant = value
-      } else if (user === undefined && parsed.type === 'user/message' && data !== undefined) {
-        const source = data.source as { kind?: unknown } | undefined
-        if (source?.kind === 'user') {
-          const value = textOf((data as { content?: unknown }).content)
-          if (value.length > 0) user = value
-        }
-      }
-      if (user !== undefined && assistant !== undefined) return { user, assistant }
+      if (typeof parsed.type !== 'string') continue
+      parsedFrame.push({
+        type: parsed.type,
+        seq: typeof parsed.seq === 'number' ? parsed.seq : -1,
+        data: parsed.data,
+      })
+    }
+    lines.unshift(...parsedFrame)
+
+    const found = readTurnPreviews(lines, endSeq)
+    if (found !== null) return found
+  }
+  return {}
+}
+
+/**
+ * Resolve one turn's previews from chronologically ordered lines.
+ * @returns the previews, or null when the turn boundary is not fully covered yet.
+ */
+function readTurnPreviews(lines: ParsedLine[], endSeq?: number): MessagePreviews | null {
+  // Locate the closing turn/end: the requested seq when given, else the last one.
+  let endIndex = -1
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i]!.type !== 'turn/end') continue
+    if (endSeq !== undefined && lines[i]!.seq !== endSeq) continue
+    endIndex = i
+    break
+  }
+  if (endIndex < 0) return null
+
+  // Its paired turn/start is the nearest one before it.
+  let startIndex = -1
+  for (let i = endIndex - 1; i >= 0; i -= 1) {
+    if (lines[i]!.type === 'turn/start') { startIndex = i; break }
+  }
+  // Not found yet: an earlier frame may still hold it — keep scanning.
+  if (startIndex < 0) return null
+
+  let user: string | undefined
+  let assistant: string | undefined
+  for (let i = startIndex + 1; i < endIndex; i += 1) {
+    const line = lines[i]!
+    const data = line.data
+    if (data === undefined) continue
+    if (line.type === 'user/message') {
+      // Injected context (source.kind !== 'user') is never a user message.
+      const source = data.source as { kind?: unknown } | undefined
+      if (source?.kind !== 'user') continue
+      const value = textOf((data as { content?: unknown }).content)
+      if (value.length > 0 && user === undefined) user = value
+    } else if (line.type === 'assistant/message') {
+      const message = data.message as { content?: unknown } | undefined
+      const content = message?.content ?? (data as { content?: unknown }).content
+      const value = textOf(content)
+      // Keep the LAST assistant message of the turn (the reply that closed it).
+      if (value.length > 0) assistant = value
     }
   }
   return {
@@ -306,7 +381,7 @@ export function semanticallyEqual(current: SessionEventLite[], base: SessionEven
 
 /**
  * Append a bare EMPTY turn pair (`turn/start` → `turn/end`, no messages) as a
- * NEW zstd frame, ALWAYS. Every BASELINE (turn-start) snapshot carries its own
+ * NEW zstd frame, ALWAYS. Every WORKSPACE (turn-start) snapshot carries its own
  * turn/start, so ANY snapshot is a valid non-blank conversation state: DSH's
  * `sessionBlank` check passes for every backup point without having to know
  * whether it was the first message. The empty turn contributes no message to

@@ -55,7 +55,7 @@ function sessionSegment(sessionId: string): string {
 /**
  * Per-session workspace bare repo: $DSH_HOME/.dsh-history/repos-ws/session-<id>.git.
  * Each session owns its workspace history, so two sessions sharing one
- * workspace directory each get their own BASELINEs and file-version chain.
+ * workspace directory each get their own WORKSPACE anchors and file-version chain.
  */
 export function workspaceRepoDir(root: string, sessionId: string): string {
   return join(root, REPOS_WS_DIRNAME, `session-${sessionSegment(sessionId)}.git`)

@@ -96,6 +96,9 @@ export async function captureSessionArtifact(
   persistence: PersistenceLike | undefined,
   session: SessionLike,
   kind: 'turn-start' | 'turn-end' | 'manual' = 'turn-end',
+  /** Seq of the `turn/end` event this capture serves, when known. Identifies the
+   *  turn the previews must come from instead of inferring it from the tail. */
+  endSeq?: number,
 ): Promise<CapturedArtifact | null> {
   const location = persistence?.locate({ ...session.header, id: session.id })
   if (location === undefined || location.path.length === 0) return null
@@ -124,13 +127,18 @@ export async function captureSessionArtifact(
   }
   let userPreview: string | undefined
   let asstPreview: string | undefined
-  if (full !== undefined) {
+  // Previews are only meaningful for a completed turn, and they are read from
+  // strictly INSIDE that turn's start/end boundary — see extractMessagePreviews.
+  // `endSeq` names the exact turn/end being snapshotted, so a message arriving
+  // during this capture cannot be mistaken for this turn's question.
+  if (full !== undefined && kind === 'turn-end') {
     try {
-      const previews = extractMessagePreviews(full)
+      const previews = extractMessagePreviews(full, endSeq)
       userPreview = previews.user
       asstPreview = previews.assistant
     } catch {
-      // Best-effort previews.
+      // Best-effort previews: leaving both unset is safe (a missing line beats
+      // a wrong pairing baked into an immutable commit).
     }
   }
 
@@ -142,7 +150,7 @@ export async function captureSessionArtifact(
   if (kind === 'turn-start' && full !== undefined) {
     try {
       const cut = preTurnPrefixLength(full)
-      // Every BASELINE (turn-start) snapshot appends one bare EMPTY turn pair
+      // Every WORKSPACE (turn-start) snapshot appends one bare EMPTY turn pair
       // (turn/start → turn/end, no messages): the snapshot itself always
       // carries a turn/start, so DSH's sessionBlank check passes for ANY
       // backup point — rewinding onto it yields a live empty session, never
@@ -244,7 +252,7 @@ export async function takeSnapshot(
   //    path) or at task start (manual path). This is the boundary pin —
   //    everything after may take a minute on a big workspace, and the file
   //    must NOT be hashed again after that.
-  const captured = await (request.captured ?? captureSessionArtifact(subprocess, root, sessions, persistence, session, request.kind))
+  const captured = await (request.captured ?? captureSessionArtifact(subprocess, root, sessions, persistence, session, request.kind, request.kind === 'turn-end' ? request.seq : undefined))
   if (captured === null) return { ok: false, reason: 'no-artifact' }
   const blobSha = captured.blobSha
 

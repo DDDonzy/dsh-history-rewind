@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit, type TimelineRow } from './api.ts'
 import { ROUTE_PREFIX, SETTINGS_NAMESPACE } from '../constants.ts'
-import { buildGraph, roadSet, type GraphRow, type RailEdge } from './layout.ts'
+import { buildGraph, roadSet, type GraphRow } from './layout.ts'
 import {
   injectStyles,
   PANEL,
@@ -42,9 +42,12 @@ import {
   DIALOG_FOOT,
   HINT,
   MODAL_BACKDROP,
+  MODAL_BLUR,
   MODAL_CARD,
   MODAL_BODY,
-  GRAPH_CELL,
+  GRAPH_OVERLAY,
+  GRAPH_GUTTER,
+  LIST_WRAP,
   PROGRESS_MASK,
   PROGRESS_CARD,
 } from './styles.ts'
@@ -184,34 +187,69 @@ function timeOf(ct: number): string {
   return `${Math.floor(delta / 86400)} 天前`
 }
 
-/** Render Node Content in Flat Trajectory Row */
-/** Max changed-file chips shown per row; overflow collapses into "+N". */
-const MAX_FILES = 12
+/** Chip metrics used to decide how many file names fit on one line. The chip
+ *  font is the 10px code face, so a character advance is ~0.6em; each chip adds
+ *  its horizontal padding, plus the flex gap between chips. */
+const CHIP_CHAR_W = 6.05
+const CHIP_PAD_W = 14
+const CHIP_GAP_W = 4
 
-/** Render a changed-file chip line: at most MAX_FILES chips + "+N" indicator,
- *  kept on a single line by clipping overflow (BASELINE & TURN rows).
- *  With `indent` (TURN rows) a leading spacer shifts the chips to the message
- *  TEXT column — the line aligns with the USER/ASST content, not the badges. */
-function FileChips(props: { files: string[]; indent?: boolean }): ReactNode {
-  const { files, indent = false } = props
+/** Painted width of one chip holding `text`. */
+const chipWidth = (text: string): number => text.length * CHIP_CHAR_W + CHIP_PAD_W
+
+/**
+ * Decide how many changed-file chips fit within `budget` pixels.
+ *
+ * There is no fixed cap: long file names simply mean fewer chips. Whatever does
+ * not fit collapses into a trailing "+N" chip, and that chip's own width is
+ * reserved before committing to a count — so the "+N" can never be the thing
+ * that overflows the line. At least one chip is always shown (truncated by CSS
+ * if a single name is wider than the whole row) so the line is never empty.
+ *
+ * @param files - changed file paths for the row.
+ * @param budget - horizontal space available to the chip line, in px.
+ * @returns the chips to render plus how many were dropped.
+ */
+function fitFileChips(files: string[], budget: number): { shown: string[]; hidden: number } {
+  if (files.length === 0) return { shown: [], hidden: 0 }
+  let used = 0
+  let count = 0
+  for (let i = 0; i < files.length; i++) {
+    const next = chipWidth(files[i]!) + (count > 0 ? CHIP_GAP_W : 0)
+    const rest = files.length - (i + 1)
+    // Reserve room for the "+N" chip when files would still remain after this one.
+    const reserve = rest > 0 ? CHIP_GAP_W + chipWidth(`+${rest}`) : 0
+    if (count > 0 && used + next + reserve > budget) break
+    used += next
+    count++
+  }
+  if (count === 0) count = 1
+  return { shown: files.slice(0, count), hidden: files.length - count }
+}
+
+/** Render a changed-file chip line: as many names as fit on one line, then a
+ *  trailing "+N". With `indent` (TURN rows) a leading spacer shifts the chips to
+ *  the message TEXT column — the line aligns with the USER/ASST content, not
+ *  the badges. */
+function FileChips(props: { files: string[]; indent?: boolean; budget: number }): ReactNode {
+  const { files, indent = false, budget } = props
   if (files.length === 0) return null
+  const { shown, hidden } = fitFileChips(files, budget)
   return createElement('div', { className: FILE_LIST },
     ...(indent ? [createElement('span', { className: FILE_INDENT }, null)] : []),
     createElement('div', { className: FILE_CLIP },
-      files.slice(0, MAX_FILES).map((file) =>
+      shown.map((file) =>
         createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
       ),
+      hidden > 0
+        ? createElement('code', { className: `${FILE_CHIP} is-more`, title: files.slice(shown.length).join('\n') }, `+${hidden}`)
+        : null,
     ),
-    files.length > MAX_FILES
-      ? createElement('code', { className: FILE_CHIP, style: { color: 'var(--dsw-alias-label-secondary, #999)' } },
-          `… +${files.length - MAX_FILES}`,
-        )
-      : null,
   )
 }
 
-function RowContentNode(props: { row: GraphRow; isHead: boolean }): ReactNode {
-  const { row, isHead } = props
+function RowContentNode(props: { row: GraphRow; isHead: boolean; chipBudget: number }): ReactNode {
+  const { row, isHead, chipBudget } = props
   const meta = row.meta
   const kind = meta?.kind ?? 'turn-start'
   const turn = meta?.turn
@@ -225,27 +263,25 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean }): ReactNode {
 
   const files = row.files ?? []
 
-  // 1. Baseline rows (turn-start): BASELINE badge + changed-file chips, all
+  // 1. Workspace rows (turn-start): WORKSPACE badge + changed-file chips, all
   //    on one line. The stored commit subject stays "[CHECK POINT]" for
   //    parser compat.
   if (kind === 'turn-start') {
-    const shown = files.slice(0, MAX_FILES)
+    // The WORKSPACE badge shares the line with the chips, so its width comes off
+    // the chip budget (9 chars of the 10px badge face + padding + the row gap).
+    const { shown, hidden } = fitFileChips(files, Math.max(0, chipBudget - 82))
     return createElement('div', { className: ROW_CONTENT },
       createElement('div', { className: ROW_MAIN },
         createElement('div', { className: `${SINGLE_LINE} ${FILE_LIST}` },
-          createElement('span', { className: 'dsh-badge dsh-badge-turn-start' }, 'BASELINE'),
-          // Chip clip: single line only — overflow clips and each chip shrinks,
-          // so the trailing "+N" always stays visible on the same line.
+          createElement('span', { className: 'dsh-badge dsh-badge-turn-start' }, 'WORKSPACE'),
           createElement('div', { className: FILE_CLIP },
             shown.map((file) =>
               createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
             ),
+            hidden > 0
+              ? createElement('code', { className: `${FILE_CHIP} is-more`, title: files.slice(shown.length).join('\n') }, `+${hidden}`)
+              : null,
           ),
-          files.length > MAX_FILES
-            ? createElement('code', { className: FILE_CHIP, style: { color: 'var(--dsw-alias-label-secondary, #999)' } },
-                `… +${files.length - MAX_FILES}`,
-              )
-            : null,
         ),
       ),
       sideElements,
@@ -286,216 +322,297 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean }): ReactNode {
       ),
       // Indented chips: align with the message TEXT column (under USER's
       // reply text) rather than with the USER/ASST role badges.
-      createElement(FileChips, { files, indent: true }),
+      createElement(FileChips, { files, indent: true, budget: Math.max(0, chipBudget - 46) }),
     ),
     sideElements,
   )
 }
 
-/** Geometry for Git Graph */
+/** Geometry for Git Graph. Node radius and rail width are both 20% up from the
+ *  original 4 / 2 for a more present graph. */
 const LANE_W = 16
-const NODE_R = 4
-const RAIL_W = 2
+const NODE_R = 4.8
+const RAIL_W = 2.4
 const NODE_GAP = 2
 
-/** Row heights (compact flat list) */
-const ROW_H_SINGLE = 22
-/** Turn-end rows show one message line per side (USER + ASST). */
-const ROW_H_TURN = 46
-/** Turn-end row with files: extra line of chips (~16px incl. gap). */
-const ROW_H_FILES = 16
+/** Card height is driven by how many text lines the card actually carries.
+ *  One line of card text (message row / chip row) plus its inter-line gap. */
+const CARD_LINE_H = 20
+/** Vertical padding inside a card (top + bottom combined). */
+const CARD_PAD_V = 20
+/** Vertical margin the card reserves inside its row (top + bottom combined). */
+const CARD_MARGIN_V = 8
 
+/**
+ * How many text lines a row's card renders.
+ *  - WORKSPACE / manual / rewind: 1 (badge and chips share the line)
+ *  - TURN: USER + ASST, plus one more line when it carries changed files
+ */
+function lineCountOf(row: GraphRow): number {
+  const kind = row.meta?.kind ?? 'turn-start'
+  if (kind !== 'turn-end') return 1
+  let lines = 1 // ASST always renders
+  if (row.meta?.userMessage) lines++
+  if ((row.files ?? []).length > 0) lines++
+  return lines
+}
+
+/** Estimated row height: card text lines + card padding + row margins. The real
+ *  height is measured from the DOM afterwards; this is the pre-paint estimate
+ *  that keeps the list from jumping. */
 function rowHeightOf(row: GraphRow): number {
-  if (row.meta?.kind === 'turn-end') {
-    return (row.files ?? []).length > 0 ? ROW_H_TURN + ROW_H_FILES : ROW_H_TURN
-  }
-  // Baseline rows render chips inline with the badge — single line, no bump.
-  return ROW_H_SINGLE
+  return lineCountOf(row) * CARD_LINE_H + CARD_PAD_V + CARD_MARGIN_V
 }
 
 const laneX = (lane: number): number => 12 + lane * LANE_W
 
-function railPath(edge: RailEdge, y0: number, y1: number): string {
-  const x0 = laneX(edge.from)
-  const x1 = laneX(edge.to)
-  if (x0 === x1) return `M ${x0} ${y0} L ${x1} ${y1}`
-  const my = (y0 + y1) / 2
-  return `M ${x0} ${y0} C ${x0} ${my}, ${x1} ${my}, ${x1} ${y1}`
+/** Measured vertical geometry of one painted row, relative to the list wrapper. */
+interface RowGeom {
+  /** Row top edge offset inside the list wrapper. */
+  top: number
+  /** Row height as painted. */
+  height: number
 }
 
-/** Graph SVG cell */
-function GraphCell(props: {
-  row: GraphRow
+/** Graph column width for a given lane count. +8 right margin + 12 left inset
+ *  (laneX base): keeps even a hovered ring fully inside the column. */
+const graphWidth = (lanes: number): number => Math.max(1, lanes) * LANE_W + 8
+
+/**
+ * Topology lookups the graph overlay needs, built ONCE per graph instead of on
+ * every render. Without this the overlay would have to scan the full commit
+ * list each paint just to find the few edges that touch the render window —
+ * which is the one thing that would actually make a very long session lag.
+ */
+interface GraphIndex {
+  /** sha → lane, for parents that may sit outside the render window. */
+  laneOf: Map<string, number>
+  /** sha → its children (newer commits), for rails leaving the window below. */
+  childrenOf: Map<string, { sha: string; lane: number }[]>
+}
+
+/** Build the overlay's topology index from laid-out rows. O(N) once per graph. */
+function buildGraphIndex(rows: GraphRow[]): GraphIndex {
+  const laneOf = new Map<string, number>()
+  const childrenOf = new Map<string, { sha: string; lane: number }[]>()
+  for (const row of rows) laneOf.set(row.sha, row.lane)
+  for (const row of rows) {
+    const parent = row.parents[0]
+    if (parent === undefined) continue
+    const list = childrenOf.get(parent)
+    if (list === undefined) childrenOf.set(parent, [{ sha: row.sha, lane: row.lane }])
+    else list.push({ sha: row.sha, lane: row.lane })
+  }
+  return { laneOf, childrenOf }
+}
+
+/**
+ * The whole git graph as ONE continuous SVG layered over the card list.
+ *
+ * Every rail is a single unbroken path running from a child commit's node
+ * centre to its parent's node centre, derived from the measured Y positions of
+ * the painted rows. This replaces the previous per-row SVG cells, where each
+ * row drew its own half-segments and the segments had to meet exactly at every
+ * row boundary — row margins, sub-pixel rounding and per-cell drop-shadows all
+ * made those joins visible as seams. With one path per rail there are no joins
+ * left to misalign, at any zoom level or card height.
+ *
+ * Colour rules are unchanged and stay endpoint-driven: a rail keeps ONE colour
+ * along its whole length, decided by its (child, parent) pair and its lane.
+ */
+function GraphOverlay(props: {
+  /** Precomputed topology index (built once per graph, not per render). */
+  index: GraphIndex
+  /** Rows currently rendered, in render order. */
+  visibleRows: GraphRow[]
   lanes: number
   colors: string[]
   headLanes: number[]
-  isHead: boolean
-  isHovered: boolean
-  /** Shas NEWER than HEAD ("future" children past the current position).
-   * Colour follows the RAIL (its endpoint pair), exactly like the hover
-   * highlight: an edge whose child is in this set draws blue-grey; HEAD and
-   * its ancestors keep the normal vivid blue. */
+  headSha: string | null
+  hoverSha: string | null
+  /** Shas NEWER than HEAD ("future" children past the current position). */
   futureSet: Set<string>
-  height: number
   /** Non-null when some row is hovered: shas on that row's ancestor path. */
   hoverPath: Set<string> | null
-}) {
-  const { row, lanes, colors, headLanes, isHead, isHovered, futureSet, height, hoverPath } = props
-  // +8 right margin + 12 left inset (laneX base): keeps even hovered ring
-  // (r ~ 7.5 + stroke) fully inside the cell.
-  const width = Math.max(1, lanes) * LANE_W + 8
-  const mid = height / 2
-  const nodeX = laneX(row.lane)
+  /** Measured row geometry, keyed by sha. */
+  geom: Record<string, RowGeom>
+  /** Total height of the list wrapper (the SVG spans all of it). */
+  height: number
+}): ReactNode {
+  const {
+    index, visibleRows, lanes, colors, headLanes, headSha, hoverSha,
+    futureSet, hoverPath, geom, height,
+  } = props
 
-  // Rail color is decided by which ROAD the rail (its lane) belongs to, not by
-  // the row it happens to cross: a rail is a continuous line across many rows,
-  // so the main rail must keep its color even while passing abandoned-row
-  // cells, and an abandoned fork rail must be grey even where its row shares
-  // the fork point (a head-road row).
+  const width = graphWidth(lanes)
+  // Nothing measured yet (first paint): skip drawing rather than draw wrong.
+  if (height <= 0) return null
+
   const grey = '#6b6b6d'
   const HOVER = '#4d88ff' // bright accent blue for the hovered ancestor path
-  // "Beyond HEAD": a rail whose child is a row NEWER than the current position
-  // draws in a blue-grey BETWEEN the brand blue and the rail grey. Like the
-  // hover highlight, colour follows the RAIL (endpoint pair), never the row —
-  // a rail keeps ONE colour across every row it crosses. HEAD and its
-  // ancestors keep the normal vivid blue; abandoned forks stay plain grey.
+  // "Beyond HEAD": a rail whose child is NEWER than the current position draws
+  // in a blue-grey between the brand blue and the rail grey.
   const AFTER_HEAD = '#7086ab'
   const onHead = (lane: number): boolean => headLanes.includes(lane)
-
-  // Hover path: shas on the hovered row's ancestor chain (incl. itself).
-  // A rail segment lights up when BOTH of its endpoints (childSha, parentSha —
-  // constant across the whole rail) lie on that path. This is precise at fork
-  // points: only the branch that leads INTO the hovered road highlights, while
-  // the other fork goes grey; a rail crossing unrelated rows also keeps its
-  // highlight because the endpoint pair does not change along its length.
-  //
-  // While hovering, EVERYTHING that is not on the path is pushed to grey —
-  // the color focus is fully on the ancestors of the hovered commit.
   const hovering = hoverPath !== null
-  const onPath = hovering && hoverPath.has(row.sha)
-  const hoverEdge = (edge: RailEdge): boolean =>
-    hoverPath !== null && hoverPath.has(edge.childSha) && hoverPath.has(edge.parentSha)
-  const strokeOf = (edge: RailEdge): string => {
-    if (hoverEdge(edge)) return HOVER
-    if (hovering) return grey
-    // Rail colour is endpoint-driven: an edge leading INTO the future set
-    // (its child is newer than HEAD) is the blue-grey, even where it crosses
-    // head-row cells; HEAD's own rail keeps the vivid blue.
-    if (futureSet.has(edge.childSha)) return AFTER_HEAD
-    return onHead(edge.lane) ? colors[edge.lane % colors.length]! : grey
-  }
-  const nodeColor = onPath
-    ? HOVER
-    : hovering ? grey
-    : isHead ? colors[row.lane % colors.length]!
-    : futureSet.has(row.sha) ? AFTER_HEAD
-    : (onHead(row.lane) ? colors[row.lane % colors.length]! : grey)
-  const railOpacity = (edge: RailEdge): number => {
-    if (hoverEdge(edge)) return 1
-    if (hovering) return 0.45 // dim non-path rails to keep focus
-    return onHead(edge.lane) ? 0.85 : 0.6
-  }
 
+  /** Node centre Y of a row, or null when it is not painted. */
+  const centreOf = (sha: string): number | null => {
+    const g = geom[sha]
+    if (g === undefined) return null
+    return g.top + g.height / 2
+  }
   const nodeStop = NODE_R + NODE_GAP
-  const rails = [
-    ...row.topEdges.map((edge, i) =>
-      createElement('path', {
-        key: `t${i}`,
-        d: railPath(edge, 0, edge.to === row.lane ? mid - nodeStop : mid),
-        fill: 'none',
-        stroke: strokeOf(edge),
-        strokeWidth: hoverEdge(edge) ? RAIL_W + 1.5 : RAIL_W,
-        opacity: railOpacity(edge),
-      }),
-    ),
-    ...row.bottomEdges.map((edge, i) =>
-      createElement('path', {
-        key: `b${i}`,
-        d: railPath(edge, edge.from === row.lane ? mid + nodeStop : mid, height),
-        fill: 'none',
-        stroke: strokeOf(edge),
-        strokeWidth: hoverEdge(edge) ? RAIL_W + 1.5 : RAIL_W,
-        opacity: railOpacity(edge),
-      }),
-    ),
-  ]
 
-  // Commit Node: dots on the hovered path grow slightly larger; the row under
-  // the cursor renders as a hollow ring (same visual language as HEAD).
-  const nodeClass = 'dsh-history-node'
-  const node = isHead || isHovered
-    ? createElement('circle', {
-        className: nodeClass,
-        cx: nodeX,
-        cy: mid,
-        r: onPath ? NODE_R + 3 : NODE_R + 1,
-        fill: 'var(--dsw-alias-bg-base, #1e1e1e)',
-        stroke: nodeColor,
-        strokeWidth: onPath ? 2.6 : isHead ? 2.4 : 2,
-      })
-    : createElement('circle', {
-        className: nodeClass,
-        cx: nodeX,
-        cy: mid,
-        r: onPath ? NODE_R + 2 : NODE_R,
-        fill: nodeColor,
-      })
+  // ---- Rails: one path per (child → parent) edge, spanning whatever vertical
+  // distance separates the two nodes. Rows are oldest-first, so the parent is
+  // ABOVE the child: the path runs upward.
+  //
+  // Only edges with at least one endpoint INSIDE the render window are built,
+  // and they are reached through the precomputed index — never by scanning the
+  // whole history. Cost per render is therefore proportional to the window, not
+  // to the session length.
+  const rails: ReactNode[] = []
+  const pushEdge = (childSha: string, childLane: number, parentSha: string): void => {
+    const parentLane = index.laneOf.get(parentSha)
+    if (parentLane === undefined) return
+    const childY = centreOf(childSha)
+    const parentY = centreOf(parentSha)
+    // The off-window end is clamped to the content edge so the rail runs off
+    // screen instead of stopping short.
+    if (childY === null && parentY === null) return
+    const y0 = childY ?? height // child below the window
+    const y1 = parentY ?? 0 // parent above the window
+
+    const x0 = laneX(childLane)
+    const x1 = laneX(parentLane)
+    // Trim both ends so the line trails off just outside the dots (hollow HEAD
+    // and hovered rings would otherwise show the stroke crossing them).
+    const startY = childY === null ? y0 : y0 - nodeStop
+    const endY = parentY === null ? y1 : y1 + nodeStop
+
+    const onPathEdge = hovering && hoverPath.has(childSha) && hoverPath.has(parentSha)
+    const stroke = onPathEdge
+      ? HOVER
+      : hovering ? grey
+      : futureSet.has(childSha) ? AFTER_HEAD
+      : (onHead(childLane) ? colors[childLane % colors.length]! : grey)
+    const opacity = onPathEdge ? 1 : hovering ? 0.45 : (onHead(childLane) ? 0.85 : 0.6)
+
+    let d: string
+    if (x0 === x1) {
+      d = `M ${x0} ${startY} L ${x1} ${endY}`
+    } else {
+      // Fork: run straight up the child's lane, then ease across into the
+      // parent's lane just below the parent node. The bend is confined to the
+      // last stretch so long rails stay visually vertical.
+      const span = Math.abs(startY - endY)
+      const bend = Math.min(span, LANE_W * 1.6)
+      const bendStart = endY + bend
+      const my = (bendStart + endY) / 2
+      d = `M ${x0} ${startY} L ${x0} ${bendStart} C ${x0} ${my}, ${x1} ${my}, ${x1} ${endY}`
+    }
+
+    rails.push(createElement('path', {
+      key: `r-${childSha}`,
+      d,
+      fill: 'none',
+      stroke,
+      strokeWidth: onPathEdge ? RAIL_W + 1.5 : RAIL_W,
+      strokeLinecap: 'round',
+      opacity,
+    }))
+  }
+
+  for (const row of visibleRows) {
+    // Edge up to this row's parent (parent may sit above the window).
+    const parentSha = row.parents[0]
+    if (parentSha !== undefined) pushEdge(row.sha, row.lane, parentSha)
+    // Edges coming up from children that are NOT painted (below the window):
+    // without these the rail would stop dead at the bottom-most card.
+    for (const kid of index.childrenOf.get(row.sha) ?? []) {
+      if (geom[kid.sha] === undefined) pushEdge(kid.sha, kid.lane, row.sha)
+    }
+  }
+
+  // ---- Nodes: one dot per painted row, drawn above the rails.
+  const nodes: ReactNode[] = []
+  for (const row of visibleRows) {
+    const cy = centreOf(row.sha)
+    if (cy === null) continue
+    const isHead = row.sha === headSha
+    const isHovered = row.sha === hoverSha
+    const onPath = hovering && hoverPath.has(row.sha)
+    const nodeColor = onPath
+      ? HOVER
+      : hovering ? grey
+      : isHead ? colors[row.lane % colors.length]!
+      : futureSet.has(row.sha) ? AFTER_HEAD
+      : (onHead(row.lane) ? colors[row.lane % colors.length]! : grey)
+    const cx = laneX(row.lane)
+    nodes.push(isHead || isHovered
+      ? createElement('circle', {
+          key: `n-${row.sha}`,
+          className: 'dsh-history-node',
+          cx,
+          cy,
+          r: onPath ? NODE_R + 3 : NODE_R + 1,
+          fill: 'var(--dsw-alias-bg-base, #1e1e1e)',
+          stroke: nodeColor,
+          strokeWidth: onPath ? 2.6 : isHead ? 2.4 : 2,
+        })
+      : createElement('circle', {
+          key: `n-${row.sha}`,
+          className: 'dsh-history-node',
+          cx,
+          cy,
+          r: onPath ? NODE_R + 2 : NODE_R,
+          fill: nodeColor,
+        }),
+    )
+  }
 
   return createElement('svg', {
-    className: GRAPH_CELL,
+    className: GRAPH_OVERLAY,
     width,
     height,
     viewBox: `0 0 ${width} ${height}`,
-    style: { width, minWidth: width },
-  }, ...rails, node)
+    style: { width, height },
+  }, ...rails, ...nodes)
 }
 
-/** Timeline Row component */
+/** Timeline Row component: the card plus the gutter the shared graph overlay
+ *  draws into. The row itself no longer renders any SVG — the graph is one
+ *  continuous layer owned by the panel, so rails cannot show row-boundary
+ *  seams. */
 function HistoryRow(props: {
   row: GraphRow
   lanes: number
-  colors: string[]
-  headLanes: number[]
   isHead: boolean
-  isHovered: boolean
   isSelected: boolean
-  hoverPath: Set<string> | null
   onHover: (sha: string | null) => void
   onSelect: (row: TimelineRow) => void
   /** True for the row that carries the scroll anchor during prepend. */
   anchor: boolean
-  /** HEAD sha, for the data-sha hook used by initial centering. */
-  headSha: string | null
-  /** Measured per-sha row heights (from the live DOM) so the graph rails track
-   *  rows that are taller than the estimated constant (e.g. wrapped content). */
-  rowHeights: Record<string, number>
-  /** Report a row's real painted height up to the panel. */
-  onMeasure: (sha: string, height: number) => void
-  /** Shas newer than HEAD (see GraphCell.futureSet). */
-  futureSet: Set<string>
+  /** Horizontal space the chip line may use, in px. */
+  chipBudget: number
 }) {
-  const { row, lanes, colors, headLanes, isHead, isHovered, isSelected, hoverPath, onHover, onSelect, anchor, headSha, rowHeights, onMeasure, futureSet } = props
+  const { row, lanes, isHead, isSelected, onHover, onSelect, anchor, chipBudget } = props
   const estimatedHeight = rowHeightOf(row)
-  // Prefer the measured height once it is available — it reflects wrapped
-  // content, so the graph cell (and its rails) fill the whole row.
-  const height = rowHeights[row.sha] ?? estimatedHeight
-  // Capture the real painted height (>= the estimate) so rails run the full
-  // row. A stable ref identity keeps React from re-measuring on re-renders.
-  const setRowEl = useCallback((node: HTMLDivElement | null): void => {
-    if (node !== null) onMeasure(row.sha, node.offsetHeight)
-  }, [row.sha, onMeasure])
   return createElement('div', {
     className: `${ROW} ${isSelected ? 'is-selected' : ''}`,
     style: { minHeight: estimatedHeight },
-    ref: setRowEl,
     'data-sha': row.sha,
     ...(anchor ? { 'data-anchor': row.sha } : {}),
     onMouseEnter: () => onHover(row.sha),
     onMouseLeave: () => onHover(null),
     onClick: () => onSelect(row),
   },
-    createElement(GraphCell, { row, lanes, colors, headLanes, isHead, isHovered, futureSet, height, hoverPath }),
-    createElement(RowContentNode, { row, isHead }),
+    createElement('div', {
+      className: GRAPH_GUTTER,
+      style: { width: graphWidth(lanes), minWidth: graphWidth(lanes) },
+    }),
+    createElement(RowContentNode, { row, isHead, chipBudget }),
   )
 }
 
@@ -525,6 +642,8 @@ function HistoryPanel(props: {
   portalTo: HTMLElement
   /** True while the rewind confirm dialog is open (panel card hides for it). */
   onDialogOpen: (open: boolean) => void
+  /** Report graph lanes back to the shell for card-only optical centering */
+  onLanesChange?: (lanes: number) => void
   /** Consumed at mount: show a pending failure notice from a rewind that
    *  failed while the panel was closed. */
   initialNotice?: string
@@ -532,7 +651,7 @@ function HistoryPanel(props: {
 }) {
   const {
     sessionId, rebind, onRewound, onRewindFailed, onProgress, portalTo,
-    onDialogOpen, initialNotice, onInitialNoticeConsumed,
+    onDialogOpen, onLanesChange, initialNotice, onInitialNoticeConsumed,
   } = props
   const [rows, setRows] = useState<TimelineRow[] | null | undefined>(undefined)
   const [head, setHead] = useState<string | null>(null)
@@ -566,13 +685,16 @@ function HistoryPanel(props: {
   }, [dialogOpen])
   /** Row currently hovered (sha), for ancestor-path highlight. */
   const [hoverSha, setHoverSha] = useState<string | null>(null)
-  /** Measured per-sha row heights (real DOM height), keyed by sha. Falling back
-   *  to the estimate lets the graph stretch to wrapped/taller rows. */
-  const [rowHeights, setRowHeights] = useState<Record<string, number>>({})
-  /** Store a row's measured height; no-op re-render when it already matches. */
-  const measureRow = useCallback((sha: string, height: number): void => {
-    setRowHeights((prev) => (prev[sha] === height ? prev : { ...prev, [sha]: height }))
-  }, [])
+  /** Live geometry of the painted rows, feeding the single graph overlay: each
+   *  row's top offset + height inside the list wrapper, plus the wrapper's own
+   *  height. Measured from the real DOM so the rails follow whatever the cards
+   *  actually paint (wrapped content, different card units, zoom). */
+  const listWrapRef = useRef<HTMLDivElement | null>(null)
+  const [graphGeom, setGraphGeom] = useState<{ rows: Record<string, RowGeom>; height: number }>({ rows: {}, height: 0 })
+  /** Painted width of the list, so the chip line knows how many file names it
+   *  can fit before collapsing the rest into "+N". Zero reads are ignored for
+   *  the same reason as the row geometry: a hidden panel measures 0. */
+  const [listWidth, setListWidth] = useState(0)
   /** 500ms hover-delay timer: the graph only switches to the hovered path
    *  after the pointer rests on a row; leaving restores the current style
    *  immediately (the graph stays on HEAD unless the user wants to switch). */
@@ -614,6 +736,16 @@ function HistoryPanel(props: {
   const graph = useMemo(() => (rows === undefined || rows === null ? null : buildGraph(rows, head)), [rows, head])
   const headSha = head
 
+  useEffect(() => {
+    if (graph !== null) {
+      onLanesChange?.(graph.lanes)
+    }
+  }, [graph, onLanesChange])
+
+  /** Topology index for the graph overlay: rebuilt only when the graph itself
+   *  changes, so hover/scroll re-renders never re-walk the commit list. */
+  const graphIndex = useMemo(() => (graph === null ? null : buildGraphIndex(graph.rows)), [graph])
+
   // HEAD-relative ordering: rows after HEAD's row (oldest-first) are the
   // "future" children. The set drives rail colour by ENDPOINT (like the hover
   // highlight) so a rail keeps one colour across every row it crosses. MUST be
@@ -651,7 +783,9 @@ function HistoryPanel(props: {
     setWinStart({ rows: len, start, end })
   }, [graph, headSha])
 
-  // Center the HEAD row after the window slice is actually in the DOM.
+  // Center the HEAD row after the window slice is actually in the DOM. The rows
+  // sit inside the auto-margin-centered wrapper, so measure against the
+  // scrollport rect rather than offsetTop (which is wrapper-relative).
   useLayoutEffect(() => {
     const el = listRef.current
     if (el === null) return
@@ -659,15 +793,107 @@ function HistoryPanel(props: {
     if (sha === null) return
     const target = el.querySelector(`[data-sha="${sha}"]`) as HTMLElement | null
     if (target === null) return
-    el.scrollTop = Math.max(0, target.offsetTop - el.clientHeight / 2 + target.clientHeight / 2)
+    const delta = target.getBoundingClientRect().top - el.getBoundingClientRect().top
+    // Ours, not the user's: suppress the scrollbar reveal for the resulting
+    // scroll event (opening the panel would otherwise flash the bar).
+    silentScrollUntil.current = Date.now() + 200
+    el.scrollTop = Math.max(0, el.scrollTop + delta - el.clientHeight / 2 + target.clientHeight / 2)
     pendingCenter.current = null
   }, [winStart, headSha])
+
+  /** Read the painted rows and publish the geometry the graph overlay draws from.
+   *
+   *  Bails out when the wrapper measures zero height: while the rewind confirm
+   *  dialog is open the shell hides the panel card (`display: none`), and every
+   *  size read on a hidden subtree returns 0. Writing those zeros would blank
+   *  the graph — and it would STAY blank, because by the time the panel is shown
+   *  again nothing in the dependency list has changed to trigger a re-measure. */
+  const measureRows = useCallback((): void => {
+    const wrap = listWrapRef.current
+    if (wrap === null) return
+    const height = wrap.offsetHeight
+    if (height <= 0) return // hidden (dialog open) — keep the last good geometry
+    const width = wrap.clientWidth
+    if (width > 0) setListWidth((prev) => (prev === width ? prev : width))
+    const next: Record<string, RowGeom> = {}
+    for (const node of Array.from(wrap.children)) {
+      const el = node as HTMLElement
+      const sha = el.dataset.sha
+      if (sha === undefined) continue
+      next[sha] = { top: el.offsetTop, height: el.offsetHeight }
+    }
+    setGraphGeom((prev) => {
+      if (prev.height !== height) return { rows: next, height }
+      const prevKeys = Object.keys(prev.rows)
+      if (prevKeys.length !== Object.keys(next).length) return { rows: next, height }
+      for (const key of prevKeys) {
+        const a = prev.rows[key]
+        const b = next[key]
+        if (b === undefined || a!.top !== b.top || a!.height !== b.height) return { rows: next, height }
+      }
+      return prev
+    })
+  }, [])
+
+  // Measure in a layout effect so the rails land in the same frame the cards do
+  // (no visible lag between card and rail). Keyed to the things that can MOVE a
+  // card — the render window and the graph itself. Hover re-renders (the most
+  // frequent kind by far) do not re-read the DOM.
+  useLayoutEffect(() => { measureRows() }, [winStart, graph, notice, measureRows])
+
+  // Re-measure whenever the list actually changes size. This is what recovers
+  // the graph after the panel is un-hidden (cancelling the rewind dialog): the
+  // wrapper goes 0 → real height, which no state change would have announced.
+  useEffect(() => {
+    const wrap = listWrapRef.current
+    if (wrap === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => { measureRows() })
+    observer.observe(wrap)
+    return () => { observer.disconnect() }
+  }, [rows, measureRows])
 
   // Extend the window when the scrollport nears either end. Scroll anchoring:
   // when prepending rows above, the previously-visible content shifts down by
   // the added height, so we remember the anchor row and restore it after paint.
   const anchor = useRef({ sha: '', top: 0 })
+  /** True for a moment after each USER scroll: reveals the scrollbar while the
+   *  list is actually being moved, then hides it again. */
+  const [scrolling, setScrolling] = useState(false)
+  const scrollHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Pointer is in the narrow strip along the right edge, i.e. reaching for the
+   *  scrollbar. Hovering the cards must not reveal it. */
+  const [nearBar, setNearBar] = useState(false)
+  /** Programmatic scrolls (opening the panel centers on HEAD; prepends restore
+   *  the anchor) must not flash the scrollbar. Scroll events landing before this
+   *  timestamp are treated as ours, not the user's. */
+  const silentScrollUntil = useRef(0)
+  useEffect(() => () => {
+    if (scrollHideTimer.current !== null) clearTimeout(scrollHideTimer.current)
+  }, [])
+
+  /** Reveal the scrollbar when the pointer comes within reach of it. */
+  const onPointerMove = (event: { clientX: number }): void => {
+    const el = listRef.current
+    if (el === null) return
+    const rect = el.getBoundingClientRect()
+    // 22px strip inside the right edge: the 6px bar plus a comfortable approach.
+    const near = event.clientX >= rect.right - 22
+    setNearBar((prev) => (prev === near ? prev : near))
+  }
+  const onPointerLeave = (): void => { setNearBar((prev) => (prev ? false : prev)) }
+
   const onScroll = (): void => {
+    // Our own scrollTop writes fire this handler too — skip the reveal for them
+    // so opening the panel does not show a scrollbar that immediately hides.
+    if (Date.now() >= silentScrollUntil.current) {
+      setScrolling((prev) => (prev ? prev : true))
+      if (scrollHideTimer.current !== null) clearTimeout(scrollHideTimer.current)
+      scrollHideTimer.current = setTimeout(() => {
+        scrollHideTimer.current = null
+        setScrolling(false)
+      }, 700)
+    }
+
     const el = listRef.current
     const win = winStart
     if (el === null || win === null) return
@@ -693,6 +919,7 @@ function HistoryPanel(props: {
     const target = el.querySelector(`[data-sha="${anchor.current.sha}"]`) as HTMLElement | null
     if (target !== null) {
       const now = target.getBoundingClientRect().top - el.getBoundingClientRect().top
+      silentScrollUntil.current = Date.now() + 200 // anchor restore, not a user scroll
       el.scrollTop += now - anchor.current.top
     }
     anchor.current = { sha: '', top: 0 }
@@ -796,35 +1023,53 @@ function HistoryPanel(props: {
   return createElement('div', { className: PANEL },
     // Scrollable Flat Timeline List (Trajectory style), windowed ±20 around HEAD
     createElement('div', {
-      className: MODAL_BODY,
+      className: `${MODAL_BODY}${scrolling ? ' is-scrolling' : ''}${nearBar ? ' is-near-bar' : ''}`,
       ref: (node: HTMLDivElement | null): void => { listRef.current = node },
       onScroll,
+      onMouseMove: onPointerMove,
+      onMouseLeave: onPointerLeave,
     },
-      laid !== null && laid.map((row, listIdx) =>
-        createElement(HistoryRow, {
-          key: row.sha,
-          row,
-          lanes: graph!.lanes,
-          colors: RAIL_COLORS,
-          headLanes: graph!.headLanes,
-          isHead: row.sha === headSha,
-          isHovered: hoverSha === row.sha,
-          isSelected: selected?.sha === row.sha,
-          hoverPath,
-          onHover,
-          onSelect: (target) => {
-            if (selected?.sha === target.sha) {
-              setSelected(null)
-            } else {
-              setSelected(target)
-            }
-          },
-          anchor: row.sha === headSha,
-          headSha,
-          rowHeights,
-          onMeasure: measureRow,
-          futureSet,
-        }),
+      // The cards, plus ONE continuous graph SVG layered over the whole list.
+      createElement('div', {
+        className: LIST_WRAP,
+        ref: (node: HTMLDivElement | null): void => { listWrapRef.current = node },
+      },
+        laid !== null && laid.map((row) =>
+          createElement(HistoryRow, {
+            key: row.sha,
+            row,
+            lanes: graph!.lanes,
+            isHead: row.sha === headSha,
+            isSelected: selected?.sha === row.sha,
+            // Card inner width minus the graph gutter, the card's own padding
+            // and the right-hand time + sha column.
+            chipBudget: Math.max(120, (listWidth > 0 ? listWidth : 820) - graph!.lanes * LANE_W - 8 - 32 - 150),
+            onHover,
+            onSelect: (target) => {
+              if (selected?.sha === target.sha) {
+                setSelected(null)
+              } else {
+                setSelected(target)
+              }
+            },
+            anchor: row.sha === headSha,
+          }),
+        ),
+        graph !== null && laid !== null && graphIndex !== null
+          ? createElement(GraphOverlay, {
+              index: graphIndex,
+              visibleRows: laid,
+              lanes: graph.lanes,
+              colors: RAIL_COLORS,
+              headLanes: graph.headLanes,
+              headSha,
+              hoverSha,
+              futureSet,
+              hoverPath,
+              geom: graphGeom.rows,
+              height: graphGeom.height,
+            })
+          : null,
       ),
     ),
 
@@ -1112,33 +1357,124 @@ export function apply(ctx: Context): void {
       return () => window.removeEventListener('keydown', onKeyDown)
     }, [open, dialogOpen])
 
+    /** Full rect of the conversation viewport: centers the card horizontally AND
+     *  confines the blur to the chat area so the sidebar stays crisp. */
+    const [sessionBounds, setSessionBounds] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
+    /** Active lanes count in the graph, used to compute exact graph gutter width
+     *  and offset the history container so the card body (excluding git graph)
+     *  is centered on the conversation center. */
+    const [activeLanes, setActiveLanes] = useState<number>(1)
+
+    // Track the session chat area geometry. Re-measured on resize and while the
+    // layout settles (the sidebar can collapse/expand), so the blur keeps
+    // covering exactly the conversation and nothing else.
+    //
+    // MUST be a layout effect: it runs before the browser paints, so the blur
+    // layer is already confined to the conversation on the FIRST frame. With a
+    // passive effect the first paint used the `inset: 0` fallback — a full-screen
+    // tint that then snapped down to the chat area, which is what read as
+    // "the background darkens first, then blurs".
+    useLayoutEffect(() => {
+      if (!open) return
+      const findConversationEl = (): HTMLElement | null => {
+        // 1. Target the center column of the 3-column app layout directly
+        const center = document.querySelector('[class*="centerCol"]') as HTMLElement | null
+        if (center !== null && center.getBoundingClientRect().width > 200) return center
+
+        // 2. Target the conversation scroll container
+        const convScroll = document.querySelector('[data-conversation-scroll]') as HTMLElement | null
+        if (convScroll !== null && convScroll.getBoundingClientRect().width > 200) return convScroll
+
+        // 3. Fall back to conversational semantic/class names or main
+        const candidates = document.querySelectorAll('[class*="ConversationRoot"], [class*="conversation"], [class*="sessionView"], [class*="chatView"], main')
+        for (let i = 0; i < candidates.length; i++) {
+          const el = candidates[i] as HTMLElement
+          const rect = el.getBoundingClientRect()
+          if (rect.width > 200 && rect.height > 200) return el
+        }
+        return null
+      }
+
+      const updateBounds = (): void => {
+        const chatEl = findConversationEl()
+        if (chatEl !== null) {
+          const rect = chatEl.getBoundingClientRect()
+          if (rect.width > 200) {
+            setSessionBounds((prev) => (
+              prev !== null
+              && prev.left === rect.left && prev.top === rect.top
+              && prev.width === rect.width && prev.height === rect.height
+                ? prev
+                : { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+            ))
+            return
+          }
+        }
+        setSessionBounds(null)
+      }
+      updateBounds()
+      window.addEventListener('resize', updateBounds)
+      // The chat container can change size without a window resize (sidebar
+      // toggle, window chrome). Observe it directly when the API is available.
+      let observer: ResizeObserver | undefined
+      const chatEl = findConversationEl()
+      if (chatEl !== null && typeof ResizeObserver !== 'undefined') {
+        observer = new ResizeObserver(() => { updateBounds() })
+        observer.observe(chatEl)
+      }
+      return () => {
+        window.removeEventListener('resize', updateBounds)
+        observer?.disconnect()
+      }
+    }, [open])
+
     const panel = open && sessionId !== undefined
       ? createElement('div', {
           className: MODAL_BACKDROP,
           onClick: () => setOpen(false),
         },
+          // Blur layer, confined to the conversation viewport so the sidebar and
+          // the window chrome stay perfectly sharp. Kept separate from the
+          // backdrop because the backdrop must still span the whole viewport to
+          // catch clicks anywhere outside the cards. pointer-events:none lets
+          // those clicks fall through to it. Falls back to full-viewport blur
+          // when the chat container cannot be located.
+          // Rendered only once the conversation rect is known. Skipping it while
+          // unmeasured is deliberate: a full-viewport fallback would tint the
+          // sidebar for a frame — the very flash this layer is meant to avoid.
+          // The layout effect above measures before paint, so in practice the
+          // blur is present on the first painted frame.
+          sessionBounds !== null
+            ? createElement('div', {
+                className: MODAL_BLUR,
+                style: {
+                  left: `${sessionBounds.left}px`,
+                  top: `${sessionBounds.top}px`,
+                  width: `${sessionBounds.width}px`,
+                  height: `${sessionBounds.height}px`,
+                },
+              })
+            : null,
           createElement('div', {
             className: MODAL_CARD,
             tabIndex: -1,
             ref: (node: HTMLDivElement | null): void => { cardRef.current = node },
             // Hidden (kept mounted) while the rewind dialog is open: the dialog
             // is portaled into the plugin's own root and floats alone.
-            style: { outline: 'none', ...(dialogOpen ? { display: 'none' } : {}) },
+            style: {
+              outline: 'none',
+              ...(sessionBounds !== null ? {
+                position: 'fixed',
+                left: `${sessionBounds.left + sessionBounds.width / 2}px`,
+                // Shift left by exactly half of the graph gutter (graphWidth + row gap)
+                // so the card content (excluding git graph) is perfectly centered on A (conversation center).
+                transform: `translateX(calc(-50% - ${(graphWidth(activeLanes) + 12) / 2}px))`,
+                width: `min(860px, ${Math.max(300, sessionBounds.width - 48)}px)`,
+              } : {}),
+              ...(dialogOpen ? { display: 'none' } : {}),
+            },
             onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
           },
-            createElement('button', {
-              className: 'dsh-history-dialog-close',
-              title: '关闭',
-              style: {
-                position: 'absolute',
-                top: 16,
-                right: 20,
-                zIndex: 60,
-                background: 'var(--dsw-alias-bg-layer-2, #2d2d2e)',
-                border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.14))',
-              },
-              onClick: () => setOpen(false),
-            }, '✕'),
             createElement(HistoryPanel, {
               sessionId,
               rebind: (id) => rebindView(svc, id),
@@ -1150,6 +1486,7 @@ export function apply(ctx: Context): void {
               onProgress: (phase, sha) => setProgress({ phase, sha, fading: false }),
               portalTo: host,
               onDialogOpen: setDialogOpen,
+              onLanesChange: setActiveLanes,
               initialNotice: pendingRewindNotice ?? undefined,
               onInitialNoticeConsumed: () => { pendingRewindNotice = null },
             }),

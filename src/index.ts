@@ -393,11 +393,11 @@ export function apply(ctx: Context): void {
   // but still interleavable; an unordered concurrent hash could read a
   // later turn's content into an earlier boundary's capture.
   const captureChains = new Map<string, Promise<unknown>>()
-  const captureOrdered = (session: SessionLike, kind: 'turn-start' | 'turn-end'): Promise<CapturedArtifact | null> => {
+  const captureOrdered = (session: SessionLike, kind: 'turn-start' | 'turn-end', endSeq?: number): Promise<CapturedArtifact | null> => {
     const previous = captureChains.get(session.id) ?? Promise.resolve()
     const next = previous.then(
-      () => captureSessionArtifact(subprocess, root, sessions, persistence, session, kind),
-      () => captureSessionArtifact(subprocess, root, sessions, persistence, session, kind),
+      () => captureSessionArtifact(subprocess, root, sessions, persistence, session, kind, endSeq),
+      () => captureSessionArtifact(subprocess, root, sessions, persistence, session, kind, endSeq),
     )
     captureChains.set(session.id, next.then(
       () => undefined,
@@ -413,7 +413,9 @@ export function apply(ctx: Context): void {
   onSession('session/event', (session: SessionLike, event: SessionEventLike) => {
     if (event.type !== 'turn/start' && event.type !== 'turn/end') return
     const kind = event.type === 'turn/start' ? 'turn-start' : 'turn-end'
-    const captured = captureOrdered(session, kind)
+    // Pass the turn/end seq so the preview extraction binds to THIS turn's
+    // boundary rather than whatever sits at the artifact tail by then.
+    const captured = captureOrdered(session, kind, kind === 'turn-end' ? event.seq : undefined)
     void gate.run(session.id, () =>
       takeSnapshot(subprocess, root, sessions, persistence, { session, kind, seq: event.seq, captured })
         .then((result) => {

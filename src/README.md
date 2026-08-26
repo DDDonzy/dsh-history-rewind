@@ -112,7 +112,7 @@ $DSH_HOME/.dsh-history-rewind/
 │                                 #         road-<ts>=跳转后内容变化的新路
 ├── repos-ws/session-<uuid>.git   # 会话级工作区影子仓库（bare，plumbing 遍历快照）
 │                                 #   按会话隔离：同一工作区的不同会话各有独立
-│                                 #   的文件版本链与 BASELINE 锚点
+│                                 #   的文件版本链与 WORKSPACE 锚点
 │                                 #   兼容：旧 repos-ws/<project>.git 在读取时
 │                                 #   作为回退（老快照的 ws commit 仍可解析）
 └── backups/                      # 回退前备份（会话物理文件 + 工作区状态）
@@ -153,11 +153,19 @@ $DSH_HOME/.dsh-history-rewind/
   [TURN 0001][MANUAL]
 ```
 
-> **重要**：UI 显示 `BASELINE` 标签对应存储格式 `[CHECK POINT]`（turn-start）。`BASELINE` 是消息发送前的工作区变动锚点；`TURN`（turn-end）同时快照消息与工作区。存储契约未变，保证历史兼容。
+> **重要**：UI 显示 `WORKSPACE` 标签对应存储格式 `[CHECK POINT]`（turn-start）。`WORKSPACE` 是消息发送前的工作区变动锚点——只在你自己改过文件时出现，卡片上的文件 chips 就是它的内容；`TURN`（turn-end）同时快照消息与工作区。存储契约未变，保证历史兼容（旧快照照常解析）。
 
 **CHECK POINT 门控**（turn-start 快照条件）：
-- 工作区自上次快照**有变动**（`ws.reused !== true`）→ 才创建 BASELINE 快照；
+- 工作区自上次快照**有变动**（`ws.reused !== true`）→ 才创建 WORKSPACE 快照；
 - 工作区未变动 → 跳过，不产生冗余节点。
+
+**预览提取按 turn 定界**（不可退回"取最近一条"）：
+
+`extractMessagePreviews(bytes, endSeq)` 只从**一个已完成 turn 的 `turn/start` 与 `turn/end` 之间**取 USER / ASST 预览，边界之后的内容一律忽略；`endSeq` 指定本次快照服务的那个 `turn/end`，使 turn 是**被指定**的而非从文件尾部推断。定界失败时**返回空**（宁缺勿错），绝不退回"最近一条"。
+
+原因是一个真实的数据竞争：在 `turn/end` 的同一瞬间发出下一条消息，capture 读文件前工件已增长（`sessions.flush` 甚至会主动把它落盘），于是 turn N 的 commit 被写成"turn N 的 ASST + turn N+1 的 USER"——问答错配，且 turn N 真正的问题**从时间线上彻底消失**。commit 消息不可变，错配是永久的。
+
+**正确性不能依赖时序**：加锁也无法关闭这个窗口（下一条消息可能在 `turn/end` 事件派发前就已进入缓冲区），只能靠数据定界。
 
 ### 回退（跳转）
 
@@ -216,7 +224,10 @@ version，actor 携带新 agent），让跳转后的首次编辑直接通过。�
 
 - 数据源：`git log --all --topo-order --pretty=format:%H|%P|%s|%ct`（`--all` 使 road 分支可见，`%P` 供 lane 分配）；
 - 浏览器纯 SVG 手绘 git 图（零第三方图库），支持：lane 分配、分叉曲线、HEAD 定位、悬停祖先链高亮（蓝）、非主路置灰、节点放大、变动文件 chips；
-- 时间线窗口化：默认 HEAD ±20 条；滚动到两端自动加载历史/后续版本（窗口切片 + 滚动锚定，数据全量在内存）。
+- **整列一个连续 SVG**（`GraphOverlay`）：每条轨道是从子节点圆心到父节点圆心的**单条完整 path**。早期实现是"每行一个 `<svg>` 各画上下半段"，需要 N 个 SVG 的端点在每个行边界严丝合缝对齐——行外边距、子像素取整、每格独立 `drop-shadow` 都会让接头露出缝隙。改为单条 path 后没有接头可错位；
+- 轨道坐标来自**真实 DOM 测量**（`useLayoutEffect` 读每行 `offsetTop`/`offsetHeight`），所以锚点精确落在每张卡片垂直中心，自动适配不同卡片行数、内容换行与页面缩放；
+- 时间线窗口化：默认 HEAD ±20 条；滚动到两端自动加载历史/后续版本（窗口切片 + 滚动锚定，数据全量在内存）；
+- **每次渲染开销与会话长度无关**：拓扑索引（`sha → lane`、`sha → children`）用 `useMemo` 绑定 graph 只建一次，渲染时只遍历窗口内的行并经索引反查邻边；hover 重绘不触发 DOM 测量。实测每次渲染 ~0.0015ms（1000 / 10000 / 50000 条提交均相同），索引构建 5 万条约 14ms 且仅一次。
 
 ---
 
@@ -272,11 +283,12 @@ pnpm test             # 单元 + 真实 git 集成测试（temp 目录）
   - 或输入 `/history` 命令（**与官方命令同链路**：`command/run` 事件经会话投影流即时触发，零轮询）。
 - **面板内容**：
   - 左：SVG git 图（分支 rail、分叉曲线、HEAD 空心环标记）；
-  - 每行：BASELINE（工作区变动锚点）/ TURN（消息轮次）徽章、USER/ASST 消息预览、变动文件 chips（最多 12 个，超出显示 `… +N`）、commit 短 id、相对时间；
+  - 每行：WORKSPACE（工作区变动锚点）/ TURN（消息轮次）徽章、USER/ASST 消息预览、变动文件 chips（按实际宽度自适应显示条数，超出显示 `+N`）、commit 短 id、相对时间；
   - 悬停：祖先链高亮（蓝色）+ 节点放大 + 非路径元素置灰；
 - **回退**：点击任意行 → 弹出 DSH 风格「回档」对话框（标题、commit id 加粗、三个按钮：仅会话 / 仅工作区 / 会话和工作区）；
 - **快捷键**：打开后自动获得焦点；按 `Esc` 关闭；
-- **关闭**：右上角 ✕（带背景与悬停高亮/放大 10%）或点击遮罩。
+- **关闭**：点击卡片以外的空白区域，或按 `Esc`（无关闭按钮——点击卡片是「回档」，点空白是关闭）；
+- **外观**：无边框浮空卡片，直接悬浮在会话之上（无背景框）；卡片高度按文本行数自适应（WORKSPACE 1 行、TURN 2 行、TURN+文件 3 行）；背景模糊**只作用于会话区**，侧边栏保持清晰；滚动条默认隐藏，仅在滚动中或指针靠近右边缘时浮现。
 
 ---
 

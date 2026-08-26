@@ -270,7 +270,7 @@ export async function rewindSession(
     const restored = await materializeTreeExact(subprocess, wsGit, wsCommit, cwdWs, excludes)
     // Re-anchor the workspace repo to the restored state so the NEXT turn-start's
     // "did the code change?" gate compares against THIS (post-jump) tree — else
-    // the restore itself reads as a change and spawns a spurious BASELINE.
+    // the restore itself reads as a change and spawns a spurious WORKSPACE node.
     if (restored !== null) await snapshotWorkspace(subprocess, root, sessionId, cwdWs, 'dsh-history: re-anchor after workspace rewind').catch(() => undefined)
     // The restore changed on-disk versions; re-observe the restored files in the
     // LIVE agent so its next edit does not hit FS_STALE_VERSION. The session was
@@ -362,7 +362,7 @@ export async function rewindSession(
         workspaceRestored = restored !== null
         // Re-anchor the workspace repo to the restored state so the NEXT
         // turn-start's change-gate compares against this post-jump tree (else
-        // the restore itself reads as a change and spawns a spurious BASELINE).
+        // the restore itself reads as a change and spawns a spurious WORKSPACE).
         if (restored !== null) await snapshotWorkspace(subprocess, root, sessionId, cwd, 'dsh-history: re-anchor after workspace rewind').catch(() => undefined)
         // The restored set is exact: observe it (the resumed agent starts with
         // an empty observation map, so edits would otherwise fail once).

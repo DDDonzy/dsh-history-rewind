@@ -112,16 +112,121 @@ test('preTurnPrefixLength: cuts at the start of the LATEST turn/start frame', ()
   assert.equal(preTurnPrefixLength(noTurn), noTurn.length)
 })
 
+/** One complete turn: turn/start … messages … turn/end. */
+function turnLines(opts: {
+  startSeq: number
+  endSeq: number
+  user?: string
+  asst?: string
+  injected?: string
+}): string[] {
+  const lines = [JSON.stringify({ type: 'turn/start', seq: opts.startSeq, time: opts.startSeq, data: {} })]
+  if (opts.user !== undefined) {
+    lines.push(JSON.stringify({ type: 'user/message', seq: opts.startSeq + 1, time: opts.startSeq + 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: opts.user }] } }))
+  }
+  if (opts.injected !== undefined) {
+    lines.push(JSON.stringify({ type: 'user/message', seq: opts.startSeq + 2, time: opts.startSeq + 2, data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: opts.injected }] } }))
+  }
+  if (opts.asst !== undefined) {
+    lines.push(JSON.stringify({ type: 'assistant/message', seq: opts.endSeq - 1, time: opts.endSeq - 1, data: { message: { content: [{ type: 'text', text: opts.asst }] } } }))
+  }
+  lines.push(JSON.stringify({ type: 'turn/end', seq: opts.endSeq, time: opts.endSeq, data: {} }))
+  return lines
+}
+
 test('extractMessagePreviews: user (source=user) and assistant text, injected context ignored', () => {
   const art = artifact([
     frame([header()]),
-    frame([
-      JSON.stringify({ type: 'user/message', seq: 7, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '请只回复一个字：好' }] } }),
-      JSON.stringify({ type: 'user/message', seq: 8, time: 2, data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'injected context' }] } }),
-      JSON.stringify({ type: 'assistant/message', seq: 21, time: 3, data: { message: { content: [{ type: 'text', text: '好' }] } } }),
-    ]),
+    frame(turnLines({ startSeq: 6, endSeq: 22, user: '请只回复一个字：好', injected: 'injected context', asst: '好' })),
   ])
   const previews = extractMessagePreviews(art)
   assert.equal(previews.user, '请只回复一个字：好')
   assert.equal(previews.assistant, '好')
+})
+
+test('extractMessagePreviews: turn-bounded — the NEXT turn\'s message never leaks in', () => {
+  // The exact production race: turn 15 ends and the user sends message 16 in the
+  // same instant, so the artifact already carries turn 16's user message (and its
+  // turn/start) by the time the capture reads the file. Turn 15's commit must
+  // still pair turn 15's own question with turn 15's own answer.
+  const turn15 = turnLines({ startSeq: 100, endSeq: 120, user: 'USER和ASST 内容字体可以修改一下吗？', asst: '当然可以。当前正文是等宽代码字体…' })
+  const turn16Opening = [
+    JSON.stringify({ type: 'turn/start', seq: 121, time: 121, data: {} }),
+    JSON.stringify({ type: 'user/message', seq: 122, time: 122, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '右边的滚动条，默认不显示。' }] } }),
+  ]
+  const raced = artifact([frame([header()]), frame(turn15), frame(turn16Opening)])
+
+  // Bound by the turn/end seq the snapshot serves (the hardening cross-check).
+  const pinned = extractMessagePreviews(raced, 120)
+  assert.equal(pinned.user, 'USER和ASST 内容字体可以修改一下吗？')
+  assert.equal(pinned.assistant, '当然可以。当前正文是等宽代码字体…')
+
+  // Even without the seq hint, the LAST COMPLETED turn is turn 15 — turn 16 has
+  // no turn/end yet, so its user message is still out of bounds.
+  const inferred = extractMessagePreviews(raced)
+  assert.equal(inferred.user, 'USER和ASST 内容字体可以修改一下吗？')
+  assert.equal(inferred.assistant, '当然可以。当前正文是等宽代码字体…')
+})
+
+test('extractMessagePreviews: seq selects the exact turn, not just the newest', () => {
+  const art = artifact([
+    frame([header()]),
+    frame(turnLines({ startSeq: 10, endSeq: 20, user: 'first question', asst: 'first answer' })),
+    frame(turnLines({ startSeq: 30, endSeq: 40, user: 'second question', asst: 'second answer' })),
+  ])
+  // An older boundary is addressable: a slow gate snapshotting turn 1 while
+  // turn 2 already landed still commits turn 1's own pair.
+  const older = extractMessagePreviews(art, 20)
+  assert.equal(older.user, 'first question')
+  assert.equal(older.assistant, 'first answer')
+
+  const newer = extractMessagePreviews(art, 40)
+  assert.equal(newer.user, 'second question')
+  assert.equal(newer.assistant, 'second answer')
+
+  // Newest completed turn when no seq is pinned.
+  const latest = extractMessagePreviews(art)
+  assert.equal(latest.user, 'second question')
+})
+
+test('extractMessagePreviews: unresolvable boundary yields nothing (never a wrong pairing)', () => {
+  // No turn/end at all: the turn is still open, so there is no completed pair.
+  const openTurn = artifact([
+    frame([header()]),
+    frame([
+      JSON.stringify({ type: 'turn/start', seq: 5, time: 5, data: {} }),
+      JSON.stringify({ type: 'user/message', seq: 6, time: 6, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'in flight' }] } }),
+    ]),
+  ])
+  assert.deepEqual(extractMessagePreviews(openTurn), {})
+
+  // A seq that matches no turn/end must not silently fall back to another turn.
+  const complete = artifact([
+    frame([header()]),
+    frame(turnLines({ startSeq: 10, endSeq: 20, user: 'q', asst: 'a' })),
+  ])
+  assert.deepEqual(extractMessagePreviews(complete, 999), {})
+})
+
+test('extractMessagePreviews: turn spanning multiple frames still resolves', () => {
+  // Long turns are flushed across several frames; the boundary pair must be
+  // found even when start and end live in different frames.
+  const art = artifact([
+    frame([header()]),
+    frame([
+      JSON.stringify({ type: 'turn/start', seq: 50, time: 50, data: {} }),
+      JSON.stringify({ type: 'user/message', seq: 51, time: 51, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'spanning question' }] } }),
+    ]),
+    frame([
+      JSON.stringify({ type: 'assistant/message', seq: 60, time: 60, data: { message: { content: [{ type: 'text', text: 'partial' }] } } }),
+    ]),
+    frame([
+      JSON.stringify({ type: 'assistant/message', seq: 61, time: 61, data: { message: { content: [{ type: 'text', text: 'final reply' }] } } }),
+      JSON.stringify({ type: 'turn/end', seq: 62, time: 62, data: {} }),
+    ]),
+  ])
+  const previews = extractMessagePreviews(art, 62)
+  assert.equal(previews.user, 'spanning question')
+  // The reply that CLOSED the turn wins over earlier partial messages.
+  assert.equal(previews.assistant, 'final reply')
 })
