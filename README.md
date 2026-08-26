@@ -25,13 +25,30 @@
 
 ---
 
-## 安装
+## 安装步骤
 
+在电脑上打开终端（Windows 推荐打开 **命令提示符 (CMD)** 或 **PowerShell**，Mac/Linux 打开 **Terminal**），按以下步骤操作：
+
+### 1. 安装插件
+
+#### 方式一：直接通过 GitHub 安装（推荐）
 ```bash
-dsh plugin --profile web add <插件仓库路径>
+dsh plugin --profile web add github:DDDonzy/dsh-history-rewind
 ```
 
-装完后**重启 DSH** 即可。
+#### 方式二：通过本地源码安装
+如果你已经把代码 clone 到本地：
+```bash
+dsh plugin --profile web add <本地插件文件夹路径>
+# 例如 Windows:
+# dsh plugin --profile web add E:\dsh-history-rewind
+```
+
+### 2. 重启 DSH
+安装完成后，在终端重启 DSH 服务即可生效：
+```bash
+dsh web
+```
 
 ---
 
