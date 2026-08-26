@@ -2,7 +2,7 @@
 
 > 个人自用的小插件，给 DSH 聊天加上类似 Git 的版本回退能力。随缘维护～
 
-![UI Preview](assets/preview.png)
+![UI Preview](assets/preview.png?v=2)
 
 ---
 
