@@ -62,7 +62,7 @@ test('snapshotWorkspace seeds .gitignore from the global template on first snaps
   assert.equal(first.ok, true)
   assert.equal(existsSync(join(cwd, '.gitignore')), true, 'first snapshot seeds .gitignore')
   const seeded = await readFile(join(cwd, '.gitignore'), 'utf8')
-  assert.ok(seeded.includes('node_modules'), 'seeded content comes from the default template')
+  assert.ok(seeded.includes('.git'), 'seeded content comes from the default template')
 
   // Files that exist after seeding: a.txt AND the seeded .gitignore itself.
   assert.deepEqual(await treeFiles(root, sessionId, cwd), ['.gitignore', 'a.txt'])
@@ -119,7 +119,7 @@ test('readConfig / writeConfig round-trip the global gitignoreTemplate', async (
   // Fresh root: defaults apply.
   const initial = await readConfig(root)
   assert.equal(initial.enabled, true)
-  assert.ok(initial.gitignoreTemplate.includes('node_modules'))
+  assert.ok(initial.gitignoreTemplate.includes('.git'))
 
   const updated = await writeConfig(root, { gitignoreTemplate: '*.tmp\ncache/\n' })
   assert.equal(updated.gitignoreTemplate, '*.tmp\ncache/\n')
@@ -138,7 +138,7 @@ test('readConfig tolerates a corrupt config.json by falling back to full default
 
   const config = await readConfig(root)
   assert.equal(config.enabled, true)
-  assert.ok(config.gitignoreTemplate.includes('node_modules'))
+  assert.ok(config.gitignoreTemplate.includes('.git'))
 
   await rm(root, { recursive: true, force: true }).catch(() => undefined)
 })

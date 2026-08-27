@@ -32,6 +32,7 @@ test('workspace snapshot: plumbing walk skips .git and excluded dirs', async () 
   await mkdir(join(cwd, 'node_modules'), { recursive: true })
   await mkdir(join(cwd, '.git'), { recursive: true })
   await mkdir(join(cwd, 'sub', '.git'), { recursive: true })
+  await writeFile(join(cwd, '.gitignore'), '.git\nnode_modules\n')
   await writeFile(join(cwd, 'a.txt'), 'hello')
   await writeFile(join(cwd, 'sub', 'b.txt'), 'world')
   await writeFile(join(cwd, 'node_modules', 'big.txt'), 'ignored')
@@ -48,10 +49,7 @@ test('workspace snapshot: plumbing walk skips .git and excluded dirs', async () 
   const repoDir = join(historyRoot, 'repos-ws', dirs[0]!)
   const tree = await runGit(subprocess, ['git', `--git-dir=${repoDir}`, 'ls-tree', '-r', '--name-only', 'main'], cwd)
   const files = tree.stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
-  // node_modules is excluded via the .gitignore this first-ever snapshot
-  // auto-seeds from the global default template (there is no hardcoded
-  // exclude list at snapshot time any more); that seeded file is itself part
-  // of the tree.
+  // node_modules is excluded via the workspace's own .gitignore; .gitignore itself is kept.
   assert.deepEqual(files.sort(), ['.gitignore', 'a.txt', 'run.sh', 'sub/b.txt'].sort())
 
   const cat = await runGit(subprocess, ['git', `--git-dir=${repoDir}`, 'cat-file', 'blob', 'main:a.txt'], cwd)

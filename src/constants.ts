@@ -46,16 +46,6 @@ export const CONFIG_FILENAME = 'config.json'
  */
 export const DEFAULT_GITIGNORE_TEMPLATE: readonly string[] = [
   '.git',
-  'node_modules',
-  'dist',
-  'build',
-  '.next',
-  '.cache',
-  '.venv',
-  'venv',
-  '__pycache__',
-  '.idea',
-  '.vs',
 ]
 
 /** Fixed identity stamped on shadow commits (never the user's git identity). */
