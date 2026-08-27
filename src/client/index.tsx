@@ -331,9 +331,33 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean; chipBudget: num
 /** Geometry for Git Graph. Node radius and rail width are both 20% up from the
  *  original 4 / 2 for a more present graph. */
 const LANE_W = 16
-const NODE_R = 4.8
-const RAIL_W = 2.4
-const NODE_GAP = 2
+/** Base node radius and rail width, both scaled up 20% from 4.8 / 2.4. */
+const NODE_R = 5.76
+const RAIL_W = 2.88
+/** Clear space between a node's edge and where its rails stop, at 1x scale. */
+const NODE_GAP = 2.4
+
+/**
+ * Per-state node scale. Rails must stop clear of the node they touch, so the
+ * gap has to scale WITH the node — a fixed stop distance gets swallowed the
+ * moment a node grows on hover, which is what made the gap disappear exactly
+ * when the node became most prominent.
+ *
+ * Each factor is the previous stage's ratio times 1.2 (the requested hover
+ * bump), measured against the base radius:
+ *   head / hovered   was 5.8/4.8 = 1.208  ->  1.45
+ *   on-path          was 6.8/4.8 = 1.417  ->  1.70
+ *   on-path + ring   was 7.8/4.8 = 1.625  ->  1.95
+ */
+const NODE_SCALE_HEAD = 1.45
+const NODE_SCALE_ON_PATH = 1.7
+const NODE_SCALE_ON_PATH_RING = 1.95
+
+/** Rendered scale of a node, from the same state inputs the renderer uses. */
+const nodeScaleOf = (onPath: boolean, ring: boolean): number => {
+  if (onPath) return ring ? NODE_SCALE_ON_PATH_RING : NODE_SCALE_ON_PATH
+  return ring ? NODE_SCALE_HEAD : 1
+}
 
 /** Card height is driven by how many text lines the card actually carries.
  *  One line of card text (message row / chip row) plus its inter-line gap. */
@@ -374,9 +398,10 @@ interface RowGeom {
   height: number
 }
 
-/** Graph column width for a given lane count. +8 right margin + 12 left inset
- *  (laneX base): keeps even a hovered ring fully inside the column. */
-const graphWidth = (lanes: number): number => Math.max(1, lanes) * LANE_W + 8
+/** Graph column width for a given lane count. +10 right margin + 12 left inset
+ *  (laneX base): keeps even the largest ring (on-path + hovered, ~12.8px outer
+ *  radius including its stroke) fully inside the column. */
+const graphWidth = (lanes: number): number => Math.max(1, lanes) * LANE_W + 10
 
 /**
  * Topology lookups the graph overlay needs, built ONCE per graph instead of on
@@ -462,7 +487,45 @@ function GraphOverlay(props: {
     if (g === undefined) return null
     return g.top + g.height / 2
   }
-  const nodeStop = NODE_R + NODE_GAP
+
+  /**
+   * How far a rail must stop short of a given node's centre.
+   *
+   * Derived from that node's OWN rendered scale, not a constant: a hovered or
+   * on-path node grows, and a fixed stop distance would then fall inside the
+   * enlarged dot, so the rail would appear to touch (or pierce) it — the gap
+   * vanished precisely on hover. Scaling the whole stop distance keeps the
+   * visual clearance proportional at every size.
+   */
+  const stopFor = (sha: string): number => {
+    const ring = sha === headSha || sha === hoverSha
+    const onPath = hovering && hoverPath.has(sha)
+    return (NODE_R + NODE_GAP) * nodeScaleOf(onPath, ring)
+  }
+
+  /**
+   * P3 for a fork: the vertical height of the TOPMOST child of a parent.
+   *
+   * Every branch leaving the same parent turns at this one height, so a fan of
+   * forks reads as a fan — the curves share a common turn line instead of each
+   * bending at its own depth (which flattened them into near-vertical lines
+   * that were indistinguishable from the trunk).
+   *
+   * Cached per render: a parent with N children is resolved once, not N times.
+   */
+  const forkTopCache = new Map<string, number | null>()
+  const forkTopY = (parentSha: string): number | null => {
+    const cached = forkTopCache.get(parentSha)
+    if (cached !== undefined) return cached
+    let top: number | null = null
+    for (const kid of index.childrenOf.get(parentSha) ?? []) {
+      const y = centreOf(kid.sha)
+      if (y === null) continue
+      if (top === null || y < top) top = y
+    }
+    forkTopCache.set(parentSha, top)
+    return top
+  }
 
   // ---- Rails: one path per (child → parent) edge, spanning whatever vertical
   // distance separates the two nodes. Rows are oldest-first, so the parent is
@@ -487,9 +550,10 @@ function GraphOverlay(props: {
     const x0 = laneX(childLane)
     const x1 = laneX(parentLane)
     // Trim both ends so the line trails off just outside the dots (hollow HEAD
-    // and hovered rings would otherwise show the stroke crossing them).
-    const startY = childY === null ? y0 : y0 - nodeStop
-    const endY = parentY === null ? y1 : y1 + nodeStop
+    // and hovered rings would otherwise show the stroke crossing them). Each end
+    // is trimmed by ITS OWN node's scaled clearance, so the gap survives hover.
+    const startY = childY === null ? y0 : y0 - stopFor(childSha)
+    const endY = parentY === null ? y1 : y1 + stopFor(parentSha)
 
     const onPathEdge = hovering && hoverPath.has(childSha) && hoverPath.has(parentSha)
     const stroke = onPathEdge
@@ -503,14 +567,47 @@ function GraphOverlay(props: {
     if (x0 === x1) {
       d = `M ${x0} ${startY} L ${x1} ${endY}`
     } else {
-      // Fork: run straight up the child's lane, then ease across into the
-      // parent's lane just below the parent node. The bend is confined to the
-      // last stretch so long rails stay visually vertical.
-      const span = Math.abs(startY - endY)
-      const bend = Math.min(span, LANE_W * 1.6)
-      const bendStart = endY + bend
-      const my = (bendStart + endY) / 2
-      d = `M ${x0} ${startY} L ${x0} ${bendStart} C ${x0} ${my}, ${x1} ${my}, ${x1} ${endY}`
+      // ---- Fork geometry (P1 / P2 / P3 model)
+      //
+      //  P1 = the parent node (where every branch of this fan converges).
+      //  P3 = the TOPMOST child of that same parent — its Y is the shared
+      //       "turn line" for the whole fan.
+      //  P2 = this branch's turn point: P3's height, this branch's lane X.
+      //
+      // The rail runs straight up its own lane to P2, then sweeps into P1 as a
+      // cubic bezier. Both control points sit on the VERTICAL through their own
+      // endpoint, at the midpoint height between P2 and P1:
+      //
+      //   c1 = (P2.x, midY)   directly above P2
+      //   c2 = (P1.x, midY)   directly below P1
+      //
+      // Keeping each handle vertical makes the curve leave P2 straight up its
+      // own lane and enter P1 straight down the trunk, so the whole fan reads as
+      // a set of symmetric S-arcs rather than diagonal lines.
+      // P1 uses the TRIMMED parent Y, same as a straight rail: the curve has to
+      // stop clear of the parent dot or it draws through the hollow HEAD ring.
+      const p1x = x1
+      const p1y = endY
+      const p2x = x0
+      // The fan's shared turn height. This is a mid-path point, not an endpoint,
+      // so it takes no trim — the trim only applies where a rail meets a node.
+      const p2y = forkTopY(parentSha) ?? y0
+      // Never let the turn point sit above the parent, and never below the
+      // child's own start: either would fold the path back on itself.
+      const turnY = Math.max(p1y, Math.min(p2y, startY))
+
+      // Vertical handles, both at the halfway height between the two endpoints.
+      const midY = (turnY + p1y) / 2
+      const c1x = p2x
+      const c1y = midY
+      const c2x = p1x
+      const c2y = midY
+
+      d = startY > turnY
+        // Straight run up this lane, then the sweep across into the parent.
+        ? `M ${p2x} ${startY} L ${p2x} ${turnY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p1x} ${p1y}`
+        // Child already sits at (or above) the turn line: sweep directly.
+        : `M ${p2x} ${startY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p1x} ${p1y}`
     }
 
     rails.push(createElement('path', {
@@ -518,7 +615,8 @@ function GraphOverlay(props: {
       d,
       fill: 'none',
       stroke,
-      strokeWidth: onPathEdge ? RAIL_W + 1.5 : RAIL_W,
+      // Hovered path rails thicken by the same 1.2 hover factor as the nodes.
+      strokeWidth: onPathEdge ? (RAIL_W + 1.5) * 1.2 : RAIL_W,
       strokeLinecap: 'round',
       opacity,
     }))
@@ -550,23 +648,28 @@ function GraphOverlay(props: {
       : futureSet.has(row.sha) ? AFTER_HEAD
       : (onHead(row.lane) ? colors[row.lane % colors.length]! : grey)
     const cx = laneX(row.lane)
-    nodes.push(isHead || isHovered
+    // Radius comes from the SAME scale function the rail trim uses, so a node and
+    // the gap around it can never drift apart at any hover state.
+    const ring = isHead || isHovered
+    const r = NODE_R * nodeScaleOf(onPath, ring)
+    nodes.push(ring
       ? createElement('circle', {
           key: `n-${row.sha}`,
           className: 'dsh-history-node',
           cx,
           cy,
-          r: onPath ? NODE_R + 3 : NODE_R + 1,
+          r,
           fill: 'var(--dsw-alias-bg-base, #1e1e1e)',
+          // Ring thickness tracks the node scale for the same reason.
+          strokeWidth: (onPath ? 2.6 : isHead ? 2.4 : 2) * 1.2,
           stroke: nodeColor,
-          strokeWidth: onPath ? 2.6 : isHead ? 2.4 : 2,
         })
       : createElement('circle', {
           key: `n-${row.sha}`,
           className: 'dsh-history-node',
           cx,
           cy,
-          r: onPath ? NODE_R + 2 : NODE_R,
+          r,
           fill: nodeColor,
         }),
     )
