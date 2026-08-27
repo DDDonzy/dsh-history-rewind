@@ -31,17 +31,12 @@
 
 ### 1. 安装插件
 
-#### 方式一：通过 npm 安装（推荐，最快）
-```bash
-dsh plugin --profile web add dsh-history-rewind
-```
-
-#### 方式二：直接通过 GitHub 安装
+#### 方式一：直接通过 GitHub 安装（推荐）
 ```bash
 dsh plugin --profile web add github:DDDonzy/dsh-history-rewind
 ```
 
-#### 方式三：通过本地源码安装
+#### 方式二：通过本地源码安装
 如果你已经把代码 clone 到本地：
 ```bash
 dsh plugin --profile web add <本地插件文件夹路径>
@@ -54,6 +49,20 @@ dsh plugin --profile web add <本地插件文件夹路径>
 ```bash
 dsh web
 ```
+
+---
+
+## 卸载插件
+
+在终端执行以下命令即可卸载：
+
+```bash
+dsh plugin --profile web remove dsh-history-rewind
+```
+
+卸载完成后**重启 DSH** 即可。
+
+> **提示**：插件卸载后不会影响你的项目代码。如需彻底清理历史快照数据，可直接删除本地数据文件夹 `$DSH_HOME/.dsh-history-rewind/`（Windows 在 `C:\Users\<你的用户名>\.dsh\.dsh-history-rewind\`，Mac/Linux 在 `~/.dsh/.dsh-history-rewind/`）。
 
 ---
 
