@@ -25,7 +25,7 @@ import {
   argvUpdateRef, argvRevParseCommit, argvListTree, argvReadTree, argvCheckoutIndex,
   commitEnv, MODE_FILE, MODE_EXEC, type ShadowRepo,
 } from './git-commands.ts'
-import { acquireLock, ensureBareRepo, ensureExcludes, readExcludes, workspaceRepoDir, workspaceBackupDir } from './store.ts'
+import { acquireLock, ensureBareRepo, ensureWorkspaceGitignore, readExcludes, workspaceRepoDir, workspaceBackupDir } from './store.ts'
 
 /** One file in the walk. */
 interface WalkFile {
@@ -126,6 +126,12 @@ export function compileExcludes(patterns: readonly string[]): (rel: string, isDi
   }
 }
 
+/** Root-level `.gitignore` basename, forced into every snapshot regardless of
+ *  what its own (or `.gitignore`'s ancestor directory's) rules say — a rule
+ *  that happened to match it, such as a bare `*`, would otherwise make a
+ *  workspace's exclude source disappear from its own snapshots. */
+const GITIGNORE_NAME = '.gitignore'
+
 /**
  * Recursively walk cwd collecting files (skipping .git dirs and excludes).
  * @param rootDir - the workspace cwd.
@@ -139,7 +145,8 @@ async function walkFiles(rootDir: string, matcher: (rel: string, isDir: boolean)
     for (const entry of entries) {
       const name = entry.name
       const rel = relDir.length === 0 ? name : `${relDir}/${name}`
-      if (matcher(rel, entry.isDirectory())) continue
+      const isRootGitignore = relDir.length === 0 && name === GITIGNORE_NAME
+      if (!isRootGitignore && matcher(rel, entry.isDirectory())) continue
       if (entry.isDirectory()) {
         if (name === GIT_DIR_NAME) continue
         await walk(join(absDir, name), rel)
@@ -195,8 +202,11 @@ export async function snapshotWorkspace(
   try {
     const repoDir = workspaceRepoDir(root, sessionId)
     if (!(await ensureBareRepo(subprocess, repoDir))) return { ok: false, reason: 'git-unavailable' }
-    await ensureExcludes(root, sessionId)
-    const excludes = await readExcludes(root, cwd)
+    // Seed a fresh workspace's .gitignore BEFORE reading excludes and walking:
+    // that way the freshly-written file both supplies this snapshot's exclude
+    // rules and is itself picked up by the walk that follows.
+    await ensureWorkspaceGitignore(root, cwd)
+    const excludes = await readExcludes(cwd)
     const matcher = compileExcludes(excludes)
     const files = await walkFiles(cwd, matcher)
     const repo: ShadowRepo = { gitDir: repoDir }

@@ -242,3 +242,34 @@ export async function installGit(): Promise<InstallGitResult> {
     ...(typeof data.message === 'string' ? { message: data.message } : {}),
   }
 }
+
+/** Global plugin config (settings page): currently just the .gitignore seed. */
+export interface ConfigResult {
+  ok: boolean
+  gitignoreTemplate?: string
+}
+
+/** Read the current global config. */
+export async function getConfig(): Promise<ConfigResult> {
+  const data = await get(`${ROUTE_PREFIX}/config`)
+  if (data === null) return { ok: false }
+  return {
+    ok: data.ok === true,
+    ...(typeof data.gitignoreTemplate === 'string' ? { gitignoreTemplate: data.gitignoreTemplate } : {}),
+  }
+}
+
+/**
+ * Save the global default `.gitignore` template. This only seeds a
+ * workspace's `.gitignore` the FIRST time that workspace is snapshotted and
+ * has none yet — it never touches an existing `.gitignore`, including one
+ * this same template seeded earlier.
+ */
+export async function setConfig(gitignoreTemplate: string): Promise<{ ok: boolean; reason?: string }> {
+  const data = await post(`${ROUTE_PREFIX}/config`, { gitignoreTemplate })
+  if (data === null) return { ok: false, reason: 'transport' }
+  return {
+    ok: data.ok === true,
+    ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
+  }
+}

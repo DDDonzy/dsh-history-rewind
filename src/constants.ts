@@ -35,8 +35,16 @@ export const SESSION_TREE_DIR = 'session-'
 /** Basename of the official session artifact file inside tree + official layout. */
 export const SESSION_FILE_BASENAME = 'session.jsonl.zstd'
 
-/** Default workspace exclusion basenames written into every fresh ws repo. */
-export const WORKSPACE_DEFAULT_EXCLUDES: readonly string[] = [
+/** Basename of the global config file, stored right under the history root. */
+export const CONFIG_FILENAME = 'config.json'
+
+/**
+ * Seed content for a workspace's `.gitignore` when a fresh workspace has none
+ * yet. This is ONLY a starting point written once per workspace — after that
+ * the workspace's own `.gitignore` is the sole source of truth for what a
+ * snapshot excludes; nothing here is merged into the walk at snapshot time.
+ */
+export const DEFAULT_GITIGNORE_TEMPLATE: readonly string[] = [
   '.git',
   'node_modules',
   'dist',
@@ -71,7 +79,18 @@ export const SETTINGS_NAMESPACE = 'history-rewind'
 export interface HistoryRewindConfig {
   /** Whether session history rewind is enabled. */
   enabled: boolean
+  /**
+   * Global default `.gitignore` template (newline-joined text, one pattern
+   * per line). Written into a workspace's `.gitignore` only the FIRST time
+   * that workspace is snapshotted and no `.gitignore` exists there yet. A
+   * workspace that already has a `.gitignore` — whether pre-existing or
+   * edited by hand afterwards — is never touched or merged with this value.
+   */
+  gitignoreTemplate: string
 }
 
 /** Schema defaults. */
-export const HISTORY_REWIND_DEFAULTS: HistoryRewindConfig = { enabled: true }
+export const HISTORY_REWIND_DEFAULTS: HistoryRewindConfig = {
+  enabled: true,
+  gitignoreTemplate: `${DEFAULT_GITIGNORE_TEMPLATE.join('\n')}\n`,
+}

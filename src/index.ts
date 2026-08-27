@@ -24,7 +24,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdirSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { ROUTE_PREFIX } from './constants.ts'
-import { historyRoot, sessionRepoDir, ensureHistoryRoot } from './store.ts'
+import { historyRoot, sessionRepoDir, ensureHistoryRoot, readConfig, writeConfig } from './store.ts'
 import type { SubprocessLike } from './git-runner.ts'
 import { runGit, firstLine } from './git-runner.ts'
 import { argvRevParseCommit } from './git-commands.ts'
@@ -194,6 +194,14 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
+      // GET /config — global plugin config (settings page). No sessionId: this
+      // is a cross-session, cross-project setting.
+      if (pathname === `${ROUTE_PREFIX}/config` && method === 'GET') {
+        const config = await readConfig(engine.root)
+        json(res, 200, { ok: true, ...config })
+        return
+      }
+
       if (method !== 'POST') {
         json(res, 404, { ok: false, reason: 'not-found' })
         return
@@ -202,6 +210,27 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
       // POST /install-git — try a silent install (plugin config card action).
       if (pathname === `${ROUTE_PREFIX}/install-git`) {
         json(res, 200, await installGit(engine.subprocess, engine.root))
+        return
+      }
+
+      // POST /config — { gitignoreTemplate } — update the global default
+      // .gitignore seed. No sessionId is required (see GET /config above), so
+      // this must be handled before the sessionId-required branches below.
+      if (pathname === `${ROUTE_PREFIX}/config`) {
+        let configBody: unknown
+        try {
+          configBody = await readJson(req)
+        } catch {
+          json(res, 400, { ok: false, reason: 'bad-json' })
+          return
+        }
+        const configArgs = (configBody !== null && typeof configBody === 'object' ? configBody : {}) as Record<string, unknown>
+        if (typeof configArgs.gitignoreTemplate !== 'string') {
+          json(res, 400, { ok: false, reason: 'bad-args' })
+          return
+        }
+        const updated = await writeConfig(engine.root, { gitignoreTemplate: configArgs.gitignoreTemplate })
+        json(res, 200, { ok: true, ...updated })
         return
       }
 

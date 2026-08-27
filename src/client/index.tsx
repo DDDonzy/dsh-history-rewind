@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit, type TimelineRow } from './api.ts'
+import { fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit, getConfig, setConfig, type TimelineRow } from './api.ts'
 import { ROUTE_PREFIX, SETTINGS_NAMESPACE } from '../constants.ts'
 import { buildGraph, roadSet, type GraphRow } from './layout.ts'
 import {
@@ -1332,6 +1332,75 @@ function GitPluginCard(): ReactNode {
   )
 }
 
+/** Global default `.gitignore` template card (设置/history-rewind): edits the
+ *  text seeded into a workspace's `.gitignore` the first time that workspace
+ *  is snapshotted and has no `.gitignore` yet. Explicit Save button (no
+ *  autosave-on-keystroke) so an in-progress edit is never written half-typed. */
+function GitignoreTemplateCard(): ReactNode {
+  const [text, setText] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState('')
+  const load = async (): Promise<void> => {
+    const r = await getConfig()
+    if (r.ok && typeof r.gitignoreTemplate === 'string') setText(r.gitignoreTemplate)
+    setLoaded(true)
+  }
+  useEffect(() => { void load() }, [])
+  const doSave = async (): Promise<void> => {
+    setSaving(true)
+    setNotice('')
+    const r = await setConfig(text)
+    setSaving(false)
+    setNotice(r.ok ? '已保存 ✓' : `保存失败${r.reason !== undefined ? `：${r.reason}` : ''}`)
+  }
+  return createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, width: '100%' } },
+    createElement('span', { style: { fontWeight: 600, fontSize: 13 } }, '默认 .gitignore 模板'),
+    createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.5 } },
+      '仅在一个工作区第一次被快照、且该目录下还没有 .gitignore 文件时，会用这份内容自动创建一个。已存在的 .gitignore（无论是本来就有的，还是之前被这份模板创建过之后手动改过的）永远不会被覆盖或合并——快照的排除规则完全来自目标工作区自己的 .gitignore。'),
+    createElement('textarea', {
+      value: text,
+      disabled: !loaded,
+      onChange: (event: { target: { value: string } }) => setText(event.target.value),
+      placeholder: 'node_modules/\ndist/\n*.log',
+      rows: 8,
+      style: {
+        width: '100%',
+        boxSizing: 'border-box',
+        resize: 'vertical',
+        fontFamily: 'var(--ds-font-family-code, monospace)',
+        fontSize: 12,
+        lineHeight: 1.5,
+        padding: '8px 10px',
+        borderRadius: 8,
+        border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+        background: 'var(--dsw-alias-markdown-code-block, #1c1c1e)',
+        color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+      },
+    }),
+    createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+      createElement('button', {
+        type: 'button',
+        disabled: saving || !loaded,
+        onClick: () => void doSave(),
+        style: {
+          alignSelf: 'flex-start',
+          padding: '6px 14px',
+          borderRadius: 6,
+          border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+          background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
+          color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+          fontSize: 12,
+          cursor: saving ? 'default' : 'pointer',
+        },
+      }, saving ? '保存中…' : '保存'),
+      notice.length > 0
+        ? createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)' } }, notice)
+        : null,
+    ),
+  )
+}
+
 /** Full settings page (设置 → history-rewind): wraps the git status/install
  *  card in a page layout. The shell supplies { close, useSessions,
  *  useWorkspaces }; this card only needs the git check, so extra props are
@@ -1352,8 +1421,9 @@ function HistoryRewindSettingsPage(): ReactNode {
         lineHeight: 1.5,
         maxWidth: 520,
       },
-    }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。'),
+    }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。快照时只按目标工作区自己的 .gitignore 排除文件。'),
     createElement(GitPluginCard),
+    createElement(GitignoreTemplateCard),
   )
 }
 

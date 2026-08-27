@@ -120,7 +120,10 @@ $DSH_HOME/.dsh-history-rewind/
 
 - 会话仓库按 id 命名（1:1），首次快照 init；
 - 工作区快照走 plumbing 遍历（`hash-object`/`mktree`），跳过一切 `.git` 与排除规则——cwd 本身是 git 仓库时不会退化成单个 gitlink；
-- 排除规则默认：`.git`、`node_modules`、`dist`、`build`、`.next`、`.cache`、`.venv`、`venv`、`__pycache__`、`.idea`、`.vs`。
+- **排除规则完全来自目标工作区自己的 `.gitignore`**（`readExcludes(cwd)`），不再有任何硬编码的默认排除列表参与快照时的合并；一个没有 `.gitignore` 的工作区不排除任何东西（`.git` 目录除外——`walkFiles` 无条件跳过它，与排除规则无关）；
+  - 仅支持基础 glob 语法（`*`、`?`、开头 `/` 锚定到根目录、结尾 `/` 限定目录）；`!` 开头的否定行会被安全跳过（不产生误排除），`**` 递归通配、`[...]` 字符类暂不支持；
+  - 根目录下的 `.gitignore` **永远**被快照收录，即使它自己写的规则会匹配到自己（例如一条裸的 `*`）——这是 `walkFiles` 里的强制豁免，不依赖用户不去写这条规则；
+- **首次快照自动创建 `.gitignore`**：某个工作区第一次被快照、且该目录下还没有 `.gitignore` 时，`snapshotWorkspace` 会用设置面板里配置的全局默认模板（`GET/POST /dsh-history-rewind/api/config`，持久化在 `$DSH_HOME/.dsh-history-rewind/config.json`）自动写入一份，写入顺序在 `readExcludes` 与实际遍历之前，因此新建的文件本身也会被这次快照收录；已存在的 `.gitignore`（无论是本来就有的，还是之前被这份模板创建过之后手动改过的）永远不会被覆盖或合并——用户随时可以直接编辑工作区自己的 `.gitignore` 来调整排除规则，这条路径优先于设置面板的全局模板。
 
 ---
 
@@ -213,7 +216,7 @@ version，actor 携带新 agent），让跳转后的首次编辑直接通过。�
 否则报 `FS_STALE_VERSION`）。
 ```
 
-**工作区回退链路**：解析目标 commit 的 `ws=` 配对 → 备份当前工作区 → `materializeTreeExact` 精确恢复（`read-tree` + `checkout-index -a -f` 写回目标文件；随后按**与快照 walk 完全相同的排除规则**遍历工作区，删除「目标树中不存在的 in-scope 文件」并修剪空目录）。结果与快照**逐文件一致，不多不少**。排除项（`.git` / `node_modules` / `dist` …）从不进入遍历，绝不误删；跳转前已整目录备份到 `backups/`，删除可恢复。
+**工作区回退链路**：解析目标 commit 的 `ws=` 配对 → 备份当前工作区 → `materializeTreeExact` 精确恢复（`read-tree` + `checkout-index -a -f` 写回目标文件；随后按**与快照 walk 完全相同的排除规则**（即恢复时刻工作区自己的 `.gitignore`）遍历工作区，删除「目标树中不存在的 in-scope 文件」并修剪空目录）。结果与快照**逐文件一致，不多不少**。`.git` 与 `.gitignore` 命中的排除目录从不进入遍历，绝不误删；跳转前已整目录备份到 `backups/`，删除可恢复。
 
 **三种模式**：
 - **仅会话**：只回退会话消息（热重载）；
@@ -388,7 +391,7 @@ tries[1] = agents.resume({ resumeSessionId, agentOptions: { provider, model } })
 - **回退后的缓存契约**：跳转时从目标文件恢复 agent preset（重新 mount，恢复工具集/系统提示）与 provider/model 路由——保证前缀缓存（KV cache）可继续命中；preset 挂载失败时降级为裸 resume 并提示 `compositionWarning`；
 - **崩溃语义**：resume 前/后崩溃 → 磁盘 = 目标内容 + git 原样（从未因跳转写入）；进程重启后跳转目标丢失 → 快照沿现有路提交，git 自洽；
 - **turn 计数**：从 base 路推导（跳回 C2 后下一轮 = C2 的 turn+1）；
-- **工作区精确恢复**：恢复后工作区与快照逐文件一致（多余的 in-scope 文件会被删除、空目录会被修剪）；排除目录（`.git`/`node_modules`/`dist` 等）不受影响，且跳转前整目录已备份；
+- **工作区精确恢复**：恢复后工作区与快照逐文件一致（多余的 in-scope 文件会被删除、空目录会被修剪）；`.git` 与工作区 `.gitignore` 命中的目录不受影响，且跳转前整目录已备份；
 - **多会话共享同一 cwd**：工作区回退影响该 cwd 下所有会话（文档化语义）；
 - **重复实例警告**：只有单个 dsh 实例的会话仓库是安全的（回退期间 detach 后窗口极小）；不要对同一会话在多个实例并发操作。
 

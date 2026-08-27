@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import {
   HISTORY_ROOT_DIRNAME, REPOS_DIRNAME, REPOS_WS_DIRNAME,
   BACKUPS_DIRNAME, LOCKS_DIRNAME, LOCK_STALE_MS,
-  WORKSPACE_DEFAULT_EXCLUDES,
+  CONFIG_FILENAME, HISTORY_REWIND_DEFAULTS, type HistoryRewindConfig,
 } from './constants.ts'
 import type { SubprocessLike } from './git-runner.ts'
 import { runGit, firstLine } from './git-runner.ts'
@@ -185,47 +185,92 @@ export async function acquireLock(root: string, key: string, waitMs = 8000): Pro
 }
 
 /**
- * Read the workspace exclude list of one session's repo: the bare repo's
- * info/exclude if present, else the shipped defaults. Snapshotting merges the
- * shipped defaults with the file so removing a default requires an explicit rule.
- * @param root - history root (resolves the repo dir).
- * @param sessionId - the session whose workspace repo owns the excludes.
- * @returns exclude basename patterns (".git" always first).
+ * Read the snapshot exclude patterns for one workspace: its OWN `.gitignore`,
+ * and nothing else. There is no merged default list any more — an empty or
+ * missing `.gitignore` excludes nothing (besides the `.git` directory, which
+ * `walkFiles` always skips regardless of any exclude list).
+ *
+ * A line starting with `!` (gitignore negation) is dropped rather than
+ * mis-parsed: `compileExcludes` has no negation semantics, so treating `!foo`
+ * as a literal pattern would exclude a file this project actually wants
+ * tracked. Dropping it just means that one line has no effect, which is the
+ * safe direction to fail in (a snapshot that includes one extra file is
+ * recoverable; one that silently drops a wanted file is not).
+ * @param cwd - the workspace root whose `.gitignore` to read.
+ * @returns exclude basename/glob patterns (empty when there is no `.gitignore`).
  */
-export async function readExcludes(root: string, sessionId: string): Promise<string[]> {
-  const repoDir = workspaceRepoDir(root, sessionId)
-  const excludePath = join(repoDir, 'info', 'exclude')
-  let lines: string[] = []
+export async function readExcludes(cwd: string): Promise<string[]> {
+  let text: string
   try {
-    const text = await readFile(excludePath, 'utf-8')
-    lines = text.split(/\r?\n/)
+    text = await readFile(join(cwd, '.gitignore'), 'utf-8')
   } catch {
-    // No file yet: defaults apply.
+    return []
   }
-  const parsed = lines
+  return text
+    .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith('#'))
-  return [...new Set([...WORKSPACE_DEFAULT_EXCLUDES, ...parsed])]
+    .filter((line) => line.length > 0 && !line.startsWith('#') && !line.startsWith('!'))
 }
 
 /**
- * Write the default exclude list into a fresh session repo so the user can
- * adjust it (git's own info/exclude semantics, our file owns it).
- * @param root - history root.
- * @param sessionId - the session whose workspace repo owns the excludes.
+ * Seed a workspace's `.gitignore` from the global default template, but ONLY
+ * when that workspace has no `.gitignore` at all yet. An existing file —
+ * whether it pre-dated this plugin or the user edited a previously-seeded one
+ * — is never touched: this is a one-time bootstrap, not an ongoing sync.
+ * @param root - history root (resolves the global config).
+ * @param cwd - the workspace root to seed.
  */
-export async function ensureExcludes(root: string, sessionId: string): Promise<void> {
-  const repoDir = workspaceRepoDir(root, sessionId)
-  const excludePath = join(repoDir, 'info', 'exclude')
-  if (existsSync(excludePath)) return
+export async function ensureWorkspaceGitignore(root: string, cwd: string): Promise<void> {
+  const path = join(cwd, '.gitignore')
+  if (existsSync(path)) return
   try {
-    await mkdir(join(repoDir, 'info'), { recursive: true })
-    await writeFile(
-      excludePath,
-      `# dsh-history workspace excludes (one basename or glob per line; '#' comments).\n${WORKSPACE_DEFAULT_EXCLUDES.join('\n')}\n`,
-      'utf-8',
-    )
+    const config = await readConfig(root)
+    await writeFile(path, config.gitignoreTemplate, 'utf-8')
   } catch {
-    // Best-effort: readExcludes falls back to defaults.
+    // Best-effort: a workspace that cannot get a seeded .gitignore simply
+    // excludes nothing until the user adds one themselves.
   }
+}
+
+/** Absolute path of the global config file: $DSH_HOME/.dsh-history-rewind/config.json. */
+function configPath(root: string): string {
+  return join(root, CONFIG_FILENAME)
+}
+
+/**
+ * Read the global plugin config, filling in any missing/invalid field from
+ * defaults. A corrupt or absent file resolves to the full default object
+ * rather than throwing — settings are a convenience layer, never a hard
+ * dependency of the snapshot/rewind path.
+ * @param root - history root.
+ * @returns the resolved config (every field always present).
+ */
+export async function readConfig(root: string): Promise<HistoryRewindConfig> {
+  try {
+    const text = await readFile(configPath(root), 'utf-8')
+    const parsed = JSON.parse(text) as Partial<HistoryRewindConfig>
+    return {
+      enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : HISTORY_REWIND_DEFAULTS.enabled,
+      gitignoreTemplate: typeof parsed.gitignoreTemplate === 'string'
+        ? parsed.gitignoreTemplate
+        : HISTORY_REWIND_DEFAULTS.gitignoreTemplate,
+    }
+  } catch {
+    return HISTORY_REWIND_DEFAULTS
+  }
+}
+
+/**
+ * Merge-write the global plugin config (read-modify-write; unspecified fields
+ * keep their current value).
+ * @param root - history root.
+ * @param patch - fields to update.
+ * @returns the resolved config after the write.
+ */
+export async function writeConfig(root: string, patch: Partial<HistoryRewindConfig>): Promise<HistoryRewindConfig> {
+  const current = await readConfig(root)
+  const next: HistoryRewindConfig = { ...current, ...patch }
+  await mkdir(root, { recursive: true })
+  await writeFile(configPath(root), JSON.stringify(next, null, 2), 'utf-8')
+  return next
 }

@@ -200,9 +200,9 @@ async function warmFsObservation(agentCtx: unknown, files: readonly string[]): P
 }
 
 /** Current workspace in-scope file list under the same snapshot excludes. */
-async function currentWorkspaceFiles(root: string, cwd: string): Promise<string[]> {
+async function currentWorkspaceFiles(cwd: string): Promise<string[]> {
   try {
-    const excludes = await readExcludes(root, cwd)
+    const excludes = await readExcludes(cwd)
     return await workspaceFileList(cwd, excludes)
   } catch {
     return []
@@ -266,7 +266,7 @@ export async function rewindSession(
     if (backed === null) return { ok: false, reason: 'workspace-backup-failed' }
     // Exact restore: same exclude rules as the snapshot walk, so the workspace
     // ends up byte-identical to the snapshot — extra files are removed too.
-    const excludes = await readExcludes(root, cwdWs)
+    const excludes = await readExcludes(cwdWs)
     const restored = await materializeTreeExact(subprocess, wsGit, wsCommit, cwdWs, excludes)
     // Re-anchor the workspace repo to the restored state so the NEXT turn-start's
     // "did the code change?" gate compares against THIS (post-jump) tree — else
@@ -357,7 +357,7 @@ export async function rewindSession(
         // Exact restore: same exclude rules as the snapshot walk, so the
         // workspace becomes byte-identical to the snapshot (extra files that
         // did not exist at that snapshot are removed too — nothing more, nothing less).
-        const excludes = await readExcludes(root, cwd)
+        const excludes = await readExcludes(cwd)
         const restored = await materializeTreeExact(subprocess, wsGit, wsCommit, cwd, excludes)
         workspaceRestored = restored !== null
         // Re-anchor the workspace repo to the restored state so the NEXT
@@ -375,7 +375,7 @@ export async function rewindSession(
   // No restore ran (仅会话, or the paired ws snapshot was missing): the agent
   // is STILL reborn by resume, so observe every current in-scope file.
   if (warmFiles.length === 0 && cwd !== undefined && cwd.length > 0) {
-    warmFiles = await currentWorkspaceFiles(root, cwd)
+    warmFiles = await currentWorkspaceFiles(cwd)
   }
 
   // 4. Detach (flush already done): agent entry, then session entry —

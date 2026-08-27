@@ -48,7 +48,11 @@ test('workspace snapshot: plumbing walk skips .git and excluded dirs', async () 
   const repoDir = join(historyRoot, 'repos-ws', dirs[0]!)
   const tree = await runGit(subprocess, ['git', `--git-dir=${repoDir}`, 'ls-tree', '-r', '--name-only', 'main'], cwd)
   const files = tree.stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
-  assert.deepEqual(files.sort(), ['a.txt', 'run.sh', 'sub/b.txt'].sort())
+  // node_modules is excluded via the .gitignore this first-ever snapshot
+  // auto-seeds from the global default template (there is no hardcoded
+  // exclude list at snapshot time any more); that seeded file is itself part
+  // of the tree.
+  assert.deepEqual(files.sort(), ['.gitignore', 'a.txt', 'run.sh', 'sub/b.txt'].sort())
 
   const cat = await runGit(subprocess, ['git', `--git-dir=${repoDir}`, 'cat-file', 'blob', 'main:a.txt'], cwd)
   assert.equal(cat.stdout, 'hello')
