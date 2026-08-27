@@ -304,7 +304,13 @@ export const STYLES = [
   '/* Floating Card Component */',
   '.dsh-history-row-content {',
   '  display: flex;',
-  '  align-items: center;',
+  /* Bottom-align the two flex children (main content + side time/sha column)
+     instead of vertically centering them. Multi-line TURN cards (USER + ASST
+     + file chips) are taller than the single-line side column; centering put
+     the time/sha badge in the visual middle of the card instead of pinned to
+     its last line. Bottom-aligning keeps the side column level with whichever
+     line the card ends on, for 1-line and multi-line cards alike. */
+  '  align-items: flex-end;',
   '  justify-content: space-between;',
   '  min-width: 0;',
   '  flex: 1;',
