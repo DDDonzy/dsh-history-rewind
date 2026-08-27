@@ -1374,8 +1374,20 @@ function GitignoreTemplateCard(): ReactNode {
       },
     }),
     createElement('span', { style: { fontWeight: 600, fontSize: 13, flex: 'none' } }, '默认 .gitignore 模板'),
-    createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.5, flex: 'none' } },
-      '用于新项目首次快照时自动生成 .gitignore（已有文件不覆盖）。快照排除规则完全以项目本地 .gitignore 为准。'),
+    createElement('div', {
+      style: {
+        fontSize: 12,
+        color: 'var(--dsw-alias-label-secondary, #999)',
+        lineHeight: 1.5,
+        flex: 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+      },
+    },
+      createElement('span', null, '用于新项目首次快照时自动生成 .gitignore（已有文件不覆盖）。'),
+      createElement('span', null, '快照排除规则完全以项目本地 .gitignore 为准。'),
+    ),
     createElement('textarea', {
       value: text,
       disabled: !loaded,
