@@ -1332,7 +1332,7 @@ function GitPluginCard(): ReactNode {
   )
 }
 
-/** Global default `.gitignore` template card (设置/history-rewind): edits the
+/** Global default `.gitignore` template card (设置/Rewind): edits the
  *  text seeded into a workspace's `.gitignore` the first time that workspace
  *  is snapshotted and has no `.gitignore` yet. Explicit Save button (no
  *  autosave-on-keystroke) so an in-progress edit is never written half-typed. */
@@ -1354,72 +1354,114 @@ function GitignoreTemplateCard(): ReactNode {
     setSaving(false)
     setNotice(r.ok ? '已保存 ✓' : `保存失败${r.reason !== undefined ? `：${r.reason}` : ''}`)
   }
-  return createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, width: '100%' } },
-    createElement('span', { style: { fontWeight: 600, fontSize: 13 } }, '默认 .gitignore 模板'),
-    createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.5 } },
+  return createElement('div', {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      width: '100%',
+      flex: 1,
+      minHeight: 0,
+    },
+  },
+    createElement('div', {
+      style: {
+        height: 1,
+        width: '100%',
+        background: 'var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.08))',
+        margin: '6px 0 8px',
+        flex: 'none',
+      },
+    }),
+    createElement('span', { style: { fontWeight: 600, fontSize: 13, flex: 'none' } }, '默认 .gitignore 模板'),
+    createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.5, flex: 'none' } },
       '仅在一个工作区第一次被快照、且该目录下还没有 .gitignore 文件时，会用这份内容自动创建一个。已存在的 .gitignore（无论是本来就有的，还是之前被这份模板创建过之后手动改过的）永远不会被覆盖或合并——快照的排除规则完全来自目标工作区自己的 .gitignore。'),
     createElement('textarea', {
       value: text,
       disabled: !loaded,
       onChange: (event: { target: { value: string } }) => setText(event.target.value),
       placeholder: 'node_modules/\ndist/\n*.log',
-      rows: 8,
       style: {
         width: '100%',
+        flex: 1,
+        minHeight: 180,
         boxSizing: 'border-box',
-        resize: 'vertical',
+        resize: 'none',
         fontFamily: 'var(--ds-font-family-code, monospace)',
         fontSize: 12,
         lineHeight: 1.5,
-        padding: '8px 10px',
+        padding: '10px 12px',
         borderRadius: 8,
         border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
         background: 'var(--dsw-alias-markdown-code-block, #1c1c1e)',
         color: 'var(--dsw-alias-label-primary, #e6e6e6)',
       },
     }),
-    createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+    createElement('div', {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'flex-end',
+        gap: 12,
+        flex: 'none',
+        marginTop: 4,
+      },
+    },
+      notice.length > 0
+        ? createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)' } }, notice)
+        : null,
       createElement('button', {
         type: 'button',
         disabled: saving || !loaded,
         onClick: () => void doSave(),
         style: {
-          alignSelf: 'flex-start',
-          padding: '6px 14px',
+          padding: '6px 18px',
           borderRadius: 6,
           border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
           background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
           color: 'var(--dsw-alias-label-primary, #e6e6e6)',
           fontSize: 12,
+          fontWeight: 500,
           cursor: saving ? 'default' : 'pointer',
         },
       }, saving ? '保存中…' : '保存'),
-      notice.length > 0
-        ? createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)' } }, notice)
-        : null,
     ),
   )
 }
 
-/** Full settings page (设置 → history-rewind): wraps the git status/install
+/** Full settings page (设置 → Rewind): wraps the git status/install
  *  card in a page layout. The shell supplies { close, useSessions,
  *  useWorkspaces }; this card only needs the git check, so extra props are
  *  ignored. */
 function HistoryRewindSettingsPage(): ReactNode {
-  return createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, width: '100%', padding: '4px 0' } },
+  return createElement('div', {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      width: '100%',
+      height: '100%',
+      boxSizing: 'border-box',
+      minHeight: 0,
+      padding: '4px 0',
+      flex: 1,
+    },
+  },
     createElement('div', {
       style: {
         fontSize: 14,
         fontWeight: 600,
         color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+        flex: 'none',
       },
-    }, 'history-rewind'),
+    }, 'HISTORY-REWIND'),
     createElement('div', {
       style: {
         fontSize: 12,
         color: 'var(--dsw-alias-label-secondary, #999)',
         lineHeight: 1.5,
         maxWidth: 520,
+        flex: 'none',
       },
     }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。快照时只按目标工作区自己的 .gitignore 排除文件。'),
     createElement(GitPluginCard),
@@ -1718,7 +1760,7 @@ export function apply(ctx: Context): void {
       name: 'settings.section',
       id: SETTINGS_NAMESPACE,
       order: 30,
-      label: SETTINGS_NAMESPACE,
+      label: 'HISTORY-REWIND',
     }, HistoryRewindSettingsPage) as unknown)
   }
 
