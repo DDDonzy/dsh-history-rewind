@@ -1375,7 +1375,7 @@ function GitignoreTemplateCard(): ReactNode {
     }),
     createElement('span', { style: { fontWeight: 600, fontSize: 13, flex: 'none' } }, '默认 .gitignore 模板'),
     createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.5, flex: 'none' } },
-      '仅在一个工作区第一次被快照、且该目录下还没有 .gitignore 文件时，会用这份内容自动创建一个。已存在的 .gitignore（无论是本来就有的，还是之前被这份模板创建过之后手动改过的）永远不会被覆盖或合并——快照的排除规则完全来自目标工作区自己的 .gitignore。'),
+      '用于新项目首次快照时自动生成 .gitignore（已有文件不覆盖）。快照排除规则完全以项目本地 .gitignore 为准。'),
     createElement('textarea', {
       value: text,
       disabled: !loaded,
