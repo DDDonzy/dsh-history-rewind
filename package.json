@@ -1,5 +1,5 @@
 {
-    "name":  "@deepseek-ai/dsh-history-rewind",
+    "name":  "dsh-history-rewind",
     "version":  "0.1.0",
     "description": "DeepSeek Harness 可视化 Git Graph 分支历史管理插件：支持对话与工作区双轨快照、多分支自由分叉与精准回退（仅会话/仅代码/双轨全回滚），同窗口原地热重载，影子 Git 仓库零污染、秒级快照、KV Cache 缓存友好。 / Visual Git Graph branch manager for DSH: dual-track (conversation & workspace) branching, turn-level rewind & rollback.",
     "keywords": [
@@ -37,6 +37,14 @@
                            }
             },
     "license":  "MIT",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/DDDonzy/dsh-history-rewind.git"
+                   },
+    "homepage":  "https://github.com/DDDonzy/dsh-history-rewind#readme",
+    "bugs":  {
+                 "url":  "https://github.com/DDDonzy/dsh-history-rewind/issues"
+             },
     "files":  [
                   "lib/index.js",
                   "lib/invariant.js",

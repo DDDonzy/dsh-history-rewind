@@ -1,5 +1,5 @@
 # dsh bundle patch: insert this plugin into a profile's layer stack.
 - insert:
     - id: dsh-history-rewind
-      name: '@deepseek-ai/dsh-history-rewind'
+      name: 'dsh-history-rewind'
       inject: [subprocess, sessions, webServer, sessionPersistence, agents]

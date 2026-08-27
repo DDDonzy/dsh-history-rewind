@@ -1,5 +1,5 @@
 /**
- * Shared constants and plain data types for @deepseek-ai/dsh-history-rewind.
+ * Shared constants and plain data types for dsh-history-rewind.
  */
 
 /** HTTP route prefix served by the Host half for the browser channel. */

@@ -31,12 +31,17 @@
 
 ### 1. 安装插件
 
-#### 方式一：直接通过 GitHub 安装（推荐）
+#### 方式一：通过 npm 安装（推荐，最快）
+```bash
+dsh plugin --profile web add dsh-history-rewind
+```
+
+#### 方式二：直接通过 GitHub 安装
 ```bash
 dsh plugin --profile web add github:DDDonzy/dsh-history-rewind
 ```
 
-#### 方式二：通过本地源码安装
+#### 方式三：通过本地源码安装
 如果你已经把代码 clone 到本地：
 ```bash
 dsh plugin --profile web add <本地插件文件夹路径>

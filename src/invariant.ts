@@ -1,17 +1,17 @@
 /**
- * Package-owned invariant companion for @deepseek-ai/dsh-history-rewind.
+ * Package-owned invariant companion for dsh-history-rewind.
  * Canonical companion shape: { name, inject: ['invariants'], apply }.
  * Optional to mount: add a row
- *   - id: dsh-history-rewind-invariant / name: '@deepseek-ai/dsh-history-rewind/invariant' / inject: [invariants]
+ *   - id: dsh-history-rewind-invariant / name: 'dsh-history-rewind/invariant' / inject: [invariants]
  * to a profile patch when package-level startup checks are wanted.
  *
  * NOTE: keep this file import-free — a shared import between the two lib
  * entries makes the bundler emit a third chunk that package.json `files`
  * would not ship.
- * @module @deepseek-ai/dsh-history-rewind/invariant
+ * @module dsh-history-rewind/invariant
  */
 
-const PACKAGE_NAME = '@deepseek-ai/dsh-history-rewind'
+const PACKAGE_NAME = 'dsh-history-rewind'
 
 /** Keep in sync with src/constants.ts ROUTE_PREFIX. */
 const ROUTE_PREFIX = '/dsh-history-rewind/api'

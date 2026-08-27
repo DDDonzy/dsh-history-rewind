@@ -1,6 +1,6 @@
-# @deepseek-ai/dsh-history-rewind
+# dsh-history-rewind
 
-> **项目名（GitHub 仓库）：`dsh-history-rewind`**，包名同步为 `@deepseek-ai/dsh-history-rewind`（DSH 加载标识与 profile 依赖此名）。
+> **项目名（GitHub 仓库）与 npm 包名一致：`dsh-history-rewind`**（DSH 加载标识与 profile 依赖此名）。本插件为个人开源项目，与 DeepSeek 官方组织无关，不使用 `@deepseek-ai/` 官方作用域。
 
 > ⚠️ **重要声明**：本项目为**个人使用而开发**，仅按作者自身工作流演进。**后续仅修复严重 Bug，一般不接受新功能请求，也不承诺常规更新、维护或兼容性保证。** 使用前请知悉并自行评估风险。
 
@@ -246,7 +246,7 @@ profile 补丁行（`inject` 声明行级服务依赖）：
 ```yaml
 - insert:
     - id: dsh-history-rewind
-      name: '@deepseek-ai/dsh-history-rewind'
+      name: 'dsh-history-rewind'
       inject: [subprocess, sessions, webServer, sessionPersistence, agents]
 ```
 

@@ -1,5 +1,5 @@
 /**
- * Node half of @deepseek-ai/dsh-history-rewind: the shadow-store engine plus a
+ * Node half of dsh-history-rewind: the shadow-store engine plus a
  * loopback-gated HTTP channel the browser talks to.
  *
  *  - Snapshot: on every turn/start and turn/end (and on manual demand) the
@@ -17,7 +17,7 @@
  *
  * No new session is ever created; no event is hydrated; the process never
  * restarts; nothing but git carries state.
- * @module @deepseek-ai/dsh-history-rewind
+ * @module dsh-history-rewind
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
