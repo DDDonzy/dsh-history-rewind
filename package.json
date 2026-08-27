@@ -2,6 +2,13 @@
     "name":  "@deepseek-ai/dsh-history-rewind",
     "version":  "0.1.0",
     "description":  "非线性会话历史回退：任意 TURN 状态可快照、可回退（同会话 id 原地热重载），git 影子仓库为唯一事实源。",
+    "keywords": [
+        "deepseek",
+        "dsh",
+        "ai-coding",
+        "git-rewind",
+        "cordis-plugin"
+    ],
     "type":  "module",
     "main":  "lib/index.js",
     "exports":  {
