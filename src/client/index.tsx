@@ -1475,7 +1475,7 @@ function HistoryRewindSettingsPage(): ReactNode {
         maxWidth: 520,
         flex: 'none',
       },
-    }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。快照时只按目标工作区自己的 .gitignore 排除文件。'),
+    }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。'),
     createElement(GitPluginCard),
     createElement(GitignoreTemplateCard),
   )
