@@ -46,11 +46,15 @@ export interface RewindResult {
   workspaceOnly?: boolean
   detached?: boolean
   error?: string
+  /** Retained pre-rewind copies. A successful rewind drops its own, so this is
+   *  present only when something was deliberately kept or could not be removed. */
   backup?: { session?: string; workspace?: string }
   noWorkspaceSnapshot?: boolean
   workspaceRestored?: boolean
   /** Session resumed but its agent preset could not be re-mounted (cache degraded). */
   compositionWarning?: string
+  /** Post-success cleanup could not remove one or more of this call's backups. */
+  backupCleanupFailed?: boolean
 }
 
 /** Manual snapshot result. */
@@ -186,6 +190,7 @@ export async function rewind(
       : {}),
     ...(data.noWorkspaceSnapshot === true ? { noWorkspaceSnapshot: true } : {}),
     ...(data.workspaceRestored === true ? { workspaceRestored: true } : {}),
+    ...(data.backupCleanupFailed === true ? { backupCleanupFailed: true } : {}),
   }
 }
 

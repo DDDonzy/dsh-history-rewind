@@ -160,7 +160,9 @@ test('rewind (checkout): zero git changes; dedup when unchanged; road fork on ch
   assert.ok(!refs.stdout.includes('road-'))
   const log = await runGit(subprocess, argvLogAll({ gitDir: repoDir }), root)
   assert.ok(!log.stdout.includes('rewind')) // no marker commit
-  assert.ok(result.backup?.session !== undefined)
+  // A fully successful rewind cleans up its own pre-rewind copies.
+  assert.equal(result.backup, undefined)
+  assert.equal(result.backupCleanupFailed, undefined)
 
   // 2. SNAPSHOT with UNCHANGED content: nothing produced (no commit, no ref).
   const unchanged = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-start', seq: 11 })

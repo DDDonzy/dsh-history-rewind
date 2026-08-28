@@ -90,7 +90,7 @@ export interface RewindResult {
   error?: string
   /** Session was detached; resume failed (needs a reload/restart fallback). */
   detached?: boolean
-  /** Backup paths taken (session file, workspace). */
+  /** Backup paths taken (session file, workspace); present only while retained. */
   backup?: { session?: string; workspace?: string }
   /** Workspace restore was requested but no paired ws snapshot was found. */
   noWorkspaceSnapshot?: boolean
@@ -98,6 +98,8 @@ export interface RewindResult {
   workspaceRestored?: boolean
   /** Session resumed but its agent preset could not be re-mounted (cache degraded). */
   compositionWarning?: string
+  /** Post-success cleanup could not remove one or more just-created backups. */
+  backupCleanupFailed?: boolean
 }
 
 /** Work-tree gating used for the detach wait. */
@@ -209,6 +211,37 @@ async function currentWorkspaceFiles(cwd: string): Promise<string[]> {
   }
 }
 
+/** One rewind's just-created backup paths. Older backups are never touched. */
+type RewindBackup = NonNullable<RewindResult['backup']>
+
+/**
+ * Remove only the backups created by the rewind that just completed.
+ *
+ * Cleanup is deliberately best-effort and runs AFTER the complete success
+ * boundary. A failure here must not turn a successful rewind into a failed
+ * one; the surviving path is returned so callers can still diagnose or recover
+ * it. Session backups are files, workspace backups are directories, and `rm`
+ * with force handles both without touching either parent backup directory.
+ */
+async function cleanupSuccessfulBackup(backup: RewindBackup): Promise<RewindBackup | undefined> {
+  const retained: RewindBackup = {}
+  if (backup.session !== undefined) {
+    try {
+      await rm(backup.session, { force: true })
+    } catch {
+      retained.session = backup.session
+    }
+  }
+  if (backup.workspace !== undefined) {
+    try {
+      await rm(backup.workspace, { recursive: true, force: true })
+    } catch {
+      retained.workspace = backup.workspace
+    }
+  }
+  return retained.session === undefined && retained.workspace === undefined ? undefined : retained
+}
+
 /**
  * Perform one rewind (checkout-only). Single-flight per session (callers gate it).
  * @param subprocess - the subprocess service.
@@ -282,13 +315,25 @@ export async function rewindSession(
         await warmFsObservation(liveAgent.ctx, files)
       }
     }
+    // A FAILED restore keeps its backup: that is exactly the case the user
+    // needs it for. Only a confirmed-good restore drops the just-made copy.
+    if (restored === null) {
+      return {
+        ok: false,
+        reason: 'workspace-restore-failed',
+        target,
+        workspaceOnly: true,
+        backup: { workspace: backed },
+        workspaceRestored: false,
+      }
+    }
+    const retainedWs = await cleanupSuccessfulBackup({ workspace: backed })
     return {
-      ok: restored !== null,
+      ok: true,
       target,
       workspaceOnly: true,
-      backup: { workspace: backed },
-      workspaceRestored: restored !== null,
-      ...(restored === null ? { reason: 'workspace-restore-failed' } : {}),
+      workspaceRestored: true,
+      ...(retainedWs !== undefined ? { backup: retainedWs, backupCleanupFailed: true } : {}),
     }
   }
 
@@ -526,5 +571,28 @@ export async function rewindSession(
   //    changed content forks a road with parent = this target.
   setJumpTarget(sessionId, target)
   await rm(scratch, { recursive: true, force: true }).catch(() => undefined)
+
+  // 8. The rewind is fully committed now (file replaced AND resume confirmed),
+  //    so this call's own pre-rewind copies have served their purpose and are
+  //    dropped. Scope is deliberately narrow:
+  //      - only paths THIS call created; older backups are never touched;
+  //      - the session copy goes only because replace + resume both succeeded;
+  //      - the workspace copy goes only if its restore actually succeeded. A
+  //        failed restore still reaches this point (it does not abort the
+  //        rewind), and that leaves the tree half-written — precisely when the
+  //        copy is needed, so it stays.
+  //    Cleanup never downgrades a successful rewind: whatever cannot be removed
+  //    is reported back for manual recovery instead of failing the operation.
+  const cleanupTargets: RewindBackup = {}
+  if (backup.session !== undefined) cleanupTargets.session = backup.session
+  if (backup.workspace !== undefined && workspaceRestored) cleanupTargets.workspace = backup.workspace
+  const retained = await cleanupSuccessfulBackup(cleanupTargets)
+  // Anything intentionally kept (an un-restored workspace copy) survives here
+  // alongside anything the removal failed to delete.
+  const keep: RewindBackup = { ...retained }
+  if (backup.workspace !== undefined && !workspaceRestored) keep.workspace = backup.workspace
+  if (keep.session === undefined && keep.workspace === undefined) delete outcome.backup
+  else outcome.backup = keep
+  if (retained !== undefined) outcome.backupCleanupFailed = true
   return outcome
 }
