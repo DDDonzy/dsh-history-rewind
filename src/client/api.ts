@@ -33,8 +33,6 @@ export interface TimelineRow {
 export interface TimelineResult {
   ok: boolean
   reason?: string
-  error?: string
-  detail?: string
   rows?: TimelineRow[]
 }
 
@@ -159,7 +157,7 @@ export async function get(path: string): Promise<Record<string, unknown> | null>
 /** Fetch the git-graph timeline for one session. */
 export async function fetchTimeline(sessionId: string): Promise<TimelineResult> {
   const data = await get(`${ROUTE_PREFIX}/timeline?sessionId=${encodeURIComponent(sessionId)}`)
-  if (data === null) return { ok: false, reason: 'transport', error: '网络请求失败或插件服务无响应 (Transport Error)' }
+  if (data === null) return { ok: false, reason: 'transport' }
   const rows = Array.isArray(data.rows)
     ? (data.rows as unknown[]).filter((row) => row !== null && typeof row === 'object')
         .map((row) => row as TimelineRow)
@@ -167,8 +165,6 @@ export async function fetchTimeline(sessionId: string): Promise<TimelineResult> 
   return {
     ok: data.ok === true,
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
-    ...(typeof data.error === 'string' ? { error: data.error } : {}),
-    ...(typeof data.detail === 'string' ? { detail: data.detail } : {}),
     ...(rows !== undefined ? { rows } : {}),
   }
 }
@@ -333,6 +329,17 @@ export interface StoredSession {
   totalBytes: number
   title?: string
   lastModified: number
+  /** False while the per-session recursive size scan is still running. */
+  usageLoaded?: boolean
+  /** True when the per-session size request failed. */
+  usageError?: boolean
+}
+
+/** Get one session's recursive cache usage after its list row is visible. */
+export async function getCacheSessionUsage(sessionId: string): Promise<StoredSession | null> {
+  const data = await get(`${ROUTE_PREFIX}/cache/session-usage?sessionId=${encodeURIComponent(sessionId)}`)
+  if (data === null || data.ok !== true || data.session === null || typeof data.session !== 'object') return null
+  return data.session as StoredSession
 }
 
 /** Get list of all sessions that have shadow store data. */

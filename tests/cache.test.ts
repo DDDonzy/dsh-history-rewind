@@ -20,7 +20,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  ensureHistoryRoot, cacheUsage, clearCache, readConfig, writeConfig, listStoredSessions,
+  ensureHistoryRoot, cacheUsage, clearCache, readConfig, writeConfig, listStoredSessions, storedSessionUsage,
 } from '../src/store.ts'
 import { HISTORY_REWIND_DEFAULTS } from '../src/constants.ts'
 
@@ -190,6 +190,22 @@ test('listStoredSessions aggregates sizes and timestamps for each session', asyn
   assert.equal(sessionB.sessionBytes, 100)
   assert.equal(sessionB.workspaceBytes, 0)
   assert.equal(sessionB.totalBytes, 100)
+
+  await cleanup()
+})
+
+test('metadata-only session list is fast and per-session usage loads separately', async () => {
+  const { root, cleanup } = await seeded()
+
+  const summaries = await listStoredSessions(root, false)
+  const summaryA = summaries.find((s) => s.sessionId === 'a')
+  assert.ok(summaryA !== undefined)
+  assert.equal(summaryA.totalBytes, 0)
+  assert.equal(summaryA.usageLoaded, false)
+
+  const detailA = await storedSessionUsage(root, 'a')
+  assert.equal(detailA.totalBytes, 350)
+  assert.equal(detailA.usageLoaded, true)
 
   await cleanup()
 })

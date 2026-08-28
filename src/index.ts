@@ -24,7 +24,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdirSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { ROUTE_PREFIX, type HistoryRewindConfig } from './constants.ts'
-import { historyRoot, sessionRepoDir, ensureHistoryRoot, readConfig, writeConfig, cacheUsage, clearCache, listStoredSessions } from './store.ts'
+import { historyRoot, sessionRepoDir, ensureHistoryRoot, readConfig, writeConfig, cacheUsage, clearCache, listStoredSessions, storedSessionUsage } from './store.ts'
 import type { SubprocessLike } from './git-runner.ts'
 import { runGit, firstLine } from './git-runner.ts'
 import { argvRevParseCommit } from './git-commands.ts'
@@ -209,9 +209,22 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
-      // GET /cache/sessions — list of sessions holding data in the shadow store.
+      // GET /cache/session-usage?sessionId= — measure one session after its
+      // metadata row has already been returned by /cache/sessions.
+      if (pathname === `${ROUTE_PREFIX}/cache/session-usage` && method === 'GET') {
+        const sessionId = url.searchParams.get('sessionId')
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          json(res, 400, { ok: false, reason: 'bad-args' })
+          return
+        }
+        const item = await storedSessionUsage(engine.root, sessionId)
+        json(res, 200, { ok: true, session: item })
+        return
+      }
+
+      // GET /cache/sessions — fast metadata list; sizes are loaded per session.
       if (pathname === `${ROUTE_PREFIX}/cache/sessions` && method === 'GET') {
-        const stored = await listStoredSessions(engine.root)
+        const stored = await listStoredSessions(engine.root, false)
         const enriched = stored.map((item) => {
           const s = engine.sessions?.get(item.sessionId)
           const title = (s as unknown as { title?: string })?.title

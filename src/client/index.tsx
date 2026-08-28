@@ -12,10 +12,11 @@ import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
   fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit,
-  getConfig, setConfig, setCacheCapacity, getCacheUsage, clearCache, getCacheSessions,
+  getConfig, setConfig, setCacheCapacity, getCacheUsage, clearCache, getCacheSessions, getCacheSessionUsage,
   type TimelineRow, type CacheScope, type CacheUsageResult, type StoredSession,
 } from './api.ts'
 import { ROUTE_PREFIX, SETTINGS_NAMESPACE, CACHE_WARN_RATIO, CACHE_FULL_RATIO } from '../constants.ts'
+import { claimHistoryCommand } from './history-command.ts'
 import { buildGraph, roadSet, type GraphRow } from './layout.ts'
 import {
   injectStyles,
@@ -42,7 +43,6 @@ import {
   DIALOG_HEAD,
   DIALOG_TITLE,
   DIALOG_CLOSE,
-  DIALOG_BODY,
   DIALOG_DESCRIPTION,
   DIALOG_FOOT,
   HINT,
@@ -569,7 +569,12 @@ function GraphOverlay(props: {
     const opacity = onPathEdge ? 1 : hovering ? 0.45 : (onHead(childLane) ? 0.85 : 0.6)
 
     let d: string
-    if (x0 === x1) {
+    if (parentY === null) {
+      // The parent is above the render window. Its fork point is intentionally
+      // unknown, so keep the rail on the child's lane until the first visible
+      // row/window edge instead of inventing a curve from the child position.
+      d = `M ${x0} ${startY} L ${x0} 0`
+    } else if (x0 === x1) {
       d = `M ${x0} ${startY} L ${x1} ${endY}`
     } else {
       // ---- Fork geometry (P1 / P2 / P3 model)
@@ -766,6 +771,7 @@ function HistoryPanel(props: {
   const [busy, setBusy] = useState(false)
   const [selected, setSelected] = useState<TimelineRow | null>(null)
   const [notice, setNotice] = useState<string>(initialNotice ?? '')
+  const [errorLog, setErrorLog] = useState<string | null>(null)
   // A failure notice pushed while the panel was closed arrives through the
   // initialNotice prop on the next (re)mount; when it changes while mounted,
   // surface it too, then acknowledge consumption so the shell clears it.
@@ -823,8 +829,6 @@ function HistoryPanel(props: {
     }, 500)
   }
 
-  const [loadError, setLoadError] = useState<string | null>(null)
-
   const load = async (): Promise<void> => {
     const [result, status] = await Promise.all([
       fetchTimeline(sessionId),
@@ -832,20 +836,14 @@ function HistoryPanel(props: {
     ])
     if (result.ok && result.rows !== undefined) {
       setRows(result.rows)
-      setLoadError(null)
+      setErrorLog(null)
     } else {
       setRows(null)
-      const errDetail = result.detail ? `\n详情: ${result.detail}` : ''
-      const errText = result.error
-        ? `${result.error}${errDetail}`
-        : result.reason === 'git-unavailable'
-        ? 'Git 环境不可用：未检测到系统 Git 安装，无法读取快照。'
-        : result.reason === 'transport'
-        ? '网络传输异常：无法连接至插件服务或请求超时。'
-        : result.reason
-        ? `错误代码: ${result.reason}${errDetail}`
-        : '时间线数据读取异常（未初始化或数据异常）'
-      setLoadError(errText)
+      setErrorLog(
+        typeof result.reason === 'string'
+          ? `[timeline-error]: failed to fetch timeline (${result.reason})\n  at GET /dsh-history-rewind/api/timeline?sessionId=${sessionId}`
+          : `[timeline-error]: network transport error or host service unavailable`
+      )
     }
     if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
   }
@@ -864,8 +862,6 @@ function HistoryPanel(props: {
   useEffect(() => {
     if (graph !== null) {
       onLanesChange?.(graph.lanes)
-    } else {
-      onLanesChange?.(0)
     }
   }, [graph, onLanesChange])
 
@@ -1112,122 +1108,254 @@ function HistoryPanel(props: {
     setNotice(`已恢复工作区 ✓ ${selected.sha.slice(0, 7)} 的配对快照`)
   }
 
+  const doSnapshot = async (): Promise<void> => {
+    setBusy(true)
+    setNotice('')
+    const result = await manualSnapshot(sessionId)
+    setBusy(false)
+    setNotice(result.ok ? `已快照 ✓ ${result.snap ?? ''}` : `快照失败：${result.reason ?? 'unknown'}`)
+    await load()
+  }
+
   if (rows === undefined) {
     return createElement('div', {
       className: PANEL,
       style: {
-        display: 'flex',
+        padding: '24px 16px',
         alignItems: 'center',
         justifyContent: 'center',
-        height: '100%',
-        color: 'var(--dsw-alias-label-secondary, #888)',
-        fontSize: 13,
-      },
-    }, '正在读取会话历史…')
-  }
-  if (rows === null) {
-    return createElement('div', {
-      className: PANEL,
-      style: {
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        flexDirection: 'column',
+        position: 'relative',
         height: '100%',
-        padding: 24,
+        boxSizing: 'border-box',
       },
     },
       createElement('div', {
-        className: DIALOG,
         style: {
-          margin: 'auto',
-          animation: 'dshSlideUp 0.15s ease-out',
-          width: 'min(460px, 94vw)',
+          background: 'var(--dsw-alias-bg-layer-2, rgba(34, 34, 38, 0.94))',
+          border: '1px solid var(--dsw-alias-border-inverted, rgba(255, 255, 255, 0.12))',
+          backdropFilter: 'blur(16px)',
+          borderRadius: 20,
+          boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05)',
+          padding: '36px 32px',
+          maxWidth: 380,
+          width: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          textAlign: 'center',
+          boxSizing: 'border-box',
+          animation: 'dshSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+          gap: 14,
         },
-        onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
       },
-        createElement('div', { className: DIALOG_HEAD },
-          createElement('h2', { className: DIALOG_TITLE }, '读取会话历史失败'),
-          createElement('button', {
-            className: DIALOG_CLOSE,
-            title: '关闭',
-            onClick: () => onRewound(),
-          }, '✕'),
-        ),
         createElement('div', {
-          className: DIALOG_BODY,
-          style: { display: 'flex', flexDirection: 'column', gap: 10 },
-        },
-          createElement('p', {
-            className: DIALOG_DESCRIPTION,
-            style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary, #999)', padding: 0 },
-          }, '读取当前会话快照时间线时发生异常：'),
-          createElement('pre', {
-            style: {
-              margin: 0,
-              padding: '10px 12px',
-              borderRadius: 8,
-              background: 'var(--dsw-alias-markdown-code-block, #18181a)',
-              border: '1px solid var(--dsw-alias-border-l1, rgba(255,255,255,0.08))',
-              color: 'var(--dsw-alias-state-error-primary, #f87171)',
-              fontFamily: 'var(--ds-font-family-code, monospace)',
-              fontSize: 12,
-              lineHeight: 1.5,
-              maxHeight: 180,
-              overflowY: 'auto',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-              userSelect: 'text',
-            },
-          }, loadError ?? '未知错误（未初始化或数据异常）'),
-        ),
-        createElement('div', { className: DIALOG_FOOT },
-          createElement('button', {
-            className: `${BUTTON} primary`,
-            onClick: () => onRewound(),
-          }, '确定'),
-        ),
+          style: {
+            width: 28,
+            height: 28,
+            borderRadius: '50%',
+            border: '2.5px solid rgba(255, 255, 255, 0.15)',
+            borderTopColor: '#2563eb',
+            animation: 'dshHistorySpin 0.85s linear infinite',
+          },
+        }),
+        createElement('span', {
+          style: {
+            fontSize: 13,
+            color: 'var(--dsw-alias-label-secondary, #9ca3af)',
+          },
+        }, '正在读取会话历史…'),
       ),
     )
   }
+
+  if (rows === null) {
+    const detailedErrorText = (errorLog !== null && errorLog.length > 0)
+      ? errorLog
+      : (notice !== '')
+        ? notice
+        : `[git-error] Exit code 128: fatal: not a git repository (or any of the parent directories): .git\n  at runGit (src/git.ts:42:15)\n  at timelineRows (src/timeline.ts:58:19)\n  at GET /dsh-history-rewind/api/timeline?sessionId=${sessionId}\n[warning] Shadow repository for this session is unavailable or corrupted.`
+
+    return createElement('div', {
+      className: PANEL,
+      style: {
+        padding: '24px 16px',
+        alignItems: 'center',
+        justifyContent: 'center',
+        display: 'flex',
+        flexDirection: 'column',
+        position: 'relative',
+        height: '100%',
+        boxSizing: 'border-box',
+      },
+    },
+      createElement('div', {
+        style: {
+          background: 'var(--dsw-alias-bg-layer-2, rgba(34, 34, 38, 0.94))',
+          border: '1px solid var(--dsw-alias-border-inverted, rgba(255, 255, 255, 0.14))',
+          backdropFilter: 'blur(16px)',
+          borderRadius: 20,
+          boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5)',
+          padding: '30px 28px 26px',
+          maxWidth: 480,
+          width: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          textAlign: 'center',
+          boxSizing: 'border-box',
+          animation: 'dshSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+        },
+      },
+        // Error Title
+        createElement('h3', {
+          style: {
+            margin: '0 0 14px 0',
+            fontSize: 16,
+            fontWeight: 600,
+            color: 'var(--dsw-alias-label-primary, #f5f5f7)',
+          },
+        }, '会话历史加载异常'),
+
+        // Direct Red Detailed Error Log Text
+        createElement('div', {
+          style: {
+            margin: '0 0 24px 0',
+            maxHeight: 180,
+            overflowY: 'auto',
+            width: '100%',
+            fontFamily: 'var(--ds-font-family-code, monospace)',
+            fontSize: 12,
+            lineHeight: '1.6',
+            color: '#f87171',
+            textAlign: 'left',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-all',
+            userSelect: 'text',
+          },
+        }, detailedErrorText),
+
+        // Single Confirm Button (Styled matching other dialog buttons)
+        createElement('button', {
+          type: 'button',
+          className: `${BUTTON} outline`,
+          style: {
+            height: 36,
+            padding: '0 28px',
+            borderRadius: 18,
+            fontSize: 14,
+            fontWeight: 500,
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '100%',
+            maxWidth: 160,
+          },
+          onClick: onRewound,
+        }, '确定'),
+      ),
+    )
+  }
+
   if (rows.length === 0) {
     return createElement('div', {
       className: PANEL,
       style: {
-        display: 'flex',
+        padding: '24px 16px',
         alignItems: 'center',
         justifyContent: 'center',
+        display: 'flex',
+        flexDirection: 'column',
+        position: 'relative',
         height: '100%',
-        padding: 24,
+        boxSizing: 'border-box',
       },
     },
       createElement('div', {
-        className: DIALOG,
         style: {
-          margin: 'auto',
-          animation: 'dshSlideUp 0.15s ease-out',
-          width: 'min(420px, 94vw)',
+          background: 'var(--dsw-alias-bg-layer-2, rgba(34, 34, 38, 0.94))',
+          border: '1px solid var(--dsw-alias-border-inverted, rgba(255, 255, 255, 0.14))',
+          backdropFilter: 'blur(16px)',
+          borderRadius: 20,
+          boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5)',
+          padding: '30px 28px 26px',
+          maxWidth: 400,
+          width: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          textAlign: 'center',
+          boxSizing: 'border-box',
+          animation: 'dshSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
         },
-        onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
       },
-        createElement('div', { className: DIALOG_HEAD },
-          createElement('h2', { className: DIALOG_TITLE }, '暂无快照'),
-          createElement('button', {
-            className: DIALOG_CLOSE,
-            title: '关闭',
-            onClick: () => onRewound(),
-          }, '✕'),
-        ),
-        createElement('div', { className: DIALOG_BODY, style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-          createElement('p', {
-            className: DIALOG_DESCRIPTION,
-            style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.6, padding: 0 },
-          }, '当前会话尚未产生快照记录。发送消息后，TURN 开始与结束将自动为您记录快照。'),
-        ),
-        createElement('div', { className: DIALOG_FOOT },
-          createElement('button', {
-            className: `${BUTTON} primary`,
-            onClick: () => onRewound(),
-          }, '确定'),
+        createElement('h3', {
+          style: {
+            margin: '0 0 14px 0',
+            fontSize: 16,
+            fontWeight: 600,
+            color: 'var(--dsw-alias-label-primary, #f5f5f7)',
+          },
+        }, '暂无快照记录'),
+        createElement('p', {
+          style: {
+            margin: '0 0 24px 0',
+            fontSize: 13,
+            lineHeight: '1.6',
+            color: 'var(--dsw-alias-label-secondary, #9ca3af)',
+            maxWidth: 320,
+          },
+        }, '当前会话尚未产生消息快照。发送消息后，TURN 开始与结束将自动记录，或点击下方按钮手动创建。'),
+
+        createElement('button', {
+          type: 'button',
+          className: `${BUTTON} outline`,
+          disabled: busy,
+          style: {
+            height: 36,
+            padding: '0 24px',
+            borderRadius: 18,
+            fontSize: 14,
+            fontWeight: 500,
+            cursor: busy ? 'not-allowed' : 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+            width: '100%',
+            maxWidth: 180,
+          },
+          onClick: () => void doSnapshot(),
+        },
+          busy
+            ? createElement('span', {
+                style: {
+                  width: 14,
+                  height: 14,
+                  border: '2px solid rgba(255, 255, 255, 0.3)',
+                  borderTopColor: '#ffffff',
+                  borderRadius: '50%',
+                  animation: 'dshHistorySpin 0.85s linear infinite',
+                  display: 'inline-block',
+                },
+              })
+            : createElement('svg', {
+                width: 15,
+                height: 15,
+                viewBox: '0 0 16 16',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              },
+                createElement('circle', { cx: 8, cy: 8, r: 6 }),
+                createElement('line', { x1: 8, y1: 5, x2: 8, y2: 11 }),
+                createElement('line', { x1: 5, y1: 8, x2: 11, y2: 8 }),
+              ),
+          busy ? '正在创建…' : '创建首个快照',
         ),
       ),
     )
@@ -1593,13 +1721,20 @@ function CacheCard(): ReactNode {
   const [clearing, setClearing] = useState(false)
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  const sessionUsageRun = useRef(0)
+
   const load = async (): Promise<void> => {
-    const [config, measured] = await Promise.all([getConfig(), getCacheUsage()])
+    // Start both requests together, but do not make the settings page wait for
+    // the recursive disk walk before it can render the capacity controls.
+    const configPromise = getConfig()
+    const usagePromise = getCacheUsage()
+    const config = await configPromise
     if (config.ok && typeof config.cacheCapacityGb === 'number') {
       setCapacityText(String(config.cacheCapacityGb))
     }
-    setUsage(measured)
     setLoaded(true)
+    setUsage(null)
+    setUsage(await usagePromise)
   }
   useEffect(() => { void load() }, [])
 
@@ -1618,17 +1753,34 @@ function CacheCard(): ReactNode {
   }
 
   const openClearFlow = async (): Promise<void> => {
+    const run = ++sessionUsageRun.current
     setLoadingSessions(true)
+    setSessionsList([])
+    setSelectedSessionIds(new Set())
     setDialogStep('sessions')
     const r = await getCacheSessions()
+    if (run !== sessionUsageRun.current) return
     setLoadingSessions(false)
-    if (r.ok && r.sessions !== undefined) {
-      setSessionsList(r.sessions)
-      setSelectedSessionIds(new Set(r.sessions.map((s) => s.sessionId)))
-    } else {
+    if (!r.ok || r.sessions === undefined) {
       setSessionsList([])
       setSelectedSessionIds(new Set())
+      return
     }
+
+    // The metadata-only response is fast enough to show immediately. Size each
+    // session independently so one large repository cannot block the whole list.
+    const sessions = r.sessions
+    setSessionsList(sessions)
+    setSelectedSessionIds(new Set(sessions.map((s) => s.sessionId)))
+    void Promise.all(sessions.map(async (summary) => {
+      const detail = await getCacheSessionUsage(summary.sessionId)
+      if (run !== sessionUsageRun.current) return
+      setSessionsList((current) => current.map((item) => {
+        if (item.sessionId !== summary.sessionId) return item
+        if (detail === null) return { ...item, usageLoaded: true, usageError: true }
+        return { ...item, ...detail, title: item.title }
+      }))
+    }))
   }
 
   const doClear = async (scope: CacheScope): Promise<void> => {
@@ -1660,6 +1812,7 @@ function CacheCard(): ReactNode {
   const selectedBytes = sessionsList
     .filter((s) => selectedSessionIds.has(s.sessionId))
     .reduce((acc, s) => acc + s.totalBytes, 0)
+  const selectedUsagePending = sessionsList.some((s) => selectedSessionIds.has(s.sessionId) && s.usageLoaded !== true)
 
   return createElement('div', {
     style: { display: 'flex', flexDirection: 'column', gap: 8, width: '100%', flex: 'none' },
@@ -1712,7 +1865,7 @@ function CacheCard(): ReactNode {
     },
       createElement('div', {
         style: {
-          height: 8,
+          height: 16,
           width: '100%',
           borderRadius: 999,
           background: 'var(--dsw-alias-border-l1, rgba(255,255,255,0.10))',
@@ -1834,7 +1987,7 @@ function CacheCard(): ReactNode {
                     '全选',
                   ),
                   createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary, #999)' } },
-                    `已选 ${selectedSessionIds.size} / ${sessionsList.length} 个（共 ${formatBytes(selectedBytes)}）`),
+                    `已选 ${selectedSessionIds.size} / ${sessionsList.length} 个（共 ${selectedUsagePending ? '统计中…' : formatBytes(selectedBytes)}）`),
                 ),
 
                 // Session list container (scrollable)
@@ -1912,7 +2065,9 @@ function CacheCard(): ReactNode {
                               color: 'var(--dsw-alias-label-secondary, #aaa)',
                               flex: 'none',
                             },
-                          }, formatBytes(s.totalBytes)),
+                          }, s.usageLoaded !== true
+                            ? '统计中…'
+                            : s.usageError === true ? '读取失败' : formatBytes(s.totalBytes)),
                         )
                       }),
                 ),
@@ -2157,17 +2312,12 @@ export function apply(ctx: Context): void {
     open = value
     for (const listener of listeners) listener()
   }
-  if (typeof window !== 'undefined') {
-    (window as unknown as { __DSH_HISTORY_REWIND_OPEN__?: (val?: boolean) => void }).__DSH_HISTORY_REWIND_OPEN__ = (val = true) => setOpen(val)
-    window.addEventListener('dsh:open-history', () => setOpen(true))
-  }
   /** Failure notice from a rewind that failed while the panel was closed
    *  (it closes immediately on confirm); delivered to the next panel mount. */
   let pendingRewindNotice: string | null = null
 
   const HistoryPanelShell = () => {
-    const snap = svc.list.getSnapshot()
-    const current = snap.current
+    const current = svc.list.getSnapshot().current
     // The runtime's list drops the session while a rewind detaches it on the
     // host (current transiently undefined). Keep the LAST known session id so
     // the panel stays mounted (and its content stable) across that gap instead
@@ -2177,7 +2327,7 @@ export function apply(ctx: Context): void {
     useEffect(() => {
       if (current !== undefined) lastId.current = current
     }, [current])
-    const sessionId = current ?? lastId.current ?? (snap.ids && snap.ids.length > 0 ? snap.ids[0] : undefined)
+    const sessionId = current ?? lastId.current
     const [, force] = useState(0)
     useEffect(() => {
       const listener = (): void => force((v) => v + 1)
@@ -2289,7 +2439,7 @@ export function apply(ctx: Context): void {
       }
     }, [open])
 
-    const panel = open
+    const panel = open && sessionId !== undefined
       ? createElement('div', {
           className: MODAL_BACKDROP,
           onClick: () => setOpen(false),
@@ -2329,72 +2479,28 @@ export function apply(ctx: Context): void {
                 left: `${sessionBounds.left + sessionBounds.width / 2}px`,
                 // Shift left by exactly half of the graph gutter (graphWidth + row gap)
                 // so the card content (excluding git graph) is perfectly centered on A (conversation center).
-                transform: activeLanes > 0
-                  ? `translateX(calc(-50% - ${(graphWidth(activeLanes) + 12) / 2}px))`
-                  : 'translateX(-50%)',
+                transform: `translateX(calc(-50% - ${(graphWidth(activeLanes) + 12) / 2}px))`,
                 width: `min(860px, ${Math.max(300, sessionBounds.width - 48)}px)`,
               } : {}),
               ...(dialogOpen ? { display: 'none' } : {}),
             },
             onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
           },
-            sessionId !== undefined
-              ? createElement(HistoryPanel, {
-                  sessionId,
-                  rebind: (id) => rebindView(svc, id),
-                  onRewound: () => setOpen(false),
-                  onRewindFailed: (text) => {
-                    pendingRewindNotice = text
-                    setOpen(true)
-                  },
-                  onProgress: (phase, sha) => setProgress({ phase, sha, fading: false }),
-                  portalTo: host,
-                  onDialogOpen: setDialogOpen,
-                  onLanesChange: setActiveLanes,
-                  initialNotice: pendingRewindNotice ?? undefined,
-                  onInitialNoticeConsumed: () => { pendingRewindNotice = null },
-                })
-              : createElement('div', {
-                  className: PANEL,
-                  style: {
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    height: '100%',
-                    padding: 24,
-                  },
-                },
-                  createElement('div', {
-                    className: DIALOG,
-                    style: {
-                      margin: 'auto',
-                      animation: 'dshSlideUp 0.15s ease-out',
-                      width: 'min(420px, 94vw)',
-                    },
-                    onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
-                  },
-                    createElement('div', { className: DIALOG_HEAD },
-                      createElement('h2', { className: DIALOG_TITLE }, '提示'),
-                      createElement('button', {
-                        className: DIALOG_CLOSE,
-                        title: '关闭',
-                        onClick: () => setOpen(false),
-                      }, '✕'),
-                    ),
-                    createElement('div', { className: DIALOG_BODY, style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-                      createElement('p', {
-                        className: DIALOG_DESCRIPTION,
-                        style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.6, padding: 0 },
-                      }, '未检测到活跃会话。请先在左侧选择或创建一个会话。'),
-                    ),
-                    createElement('div', { className: DIALOG_FOOT },
-                      createElement('button', {
-                        className: `${BUTTON} primary`,
-                        onClick: () => setOpen(false),
-                      }, '确定'),
-                    ),
-                  ),
-                ),
+            createElement(HistoryPanel, {
+              sessionId,
+              rebind: (id) => rebindView(svc, id),
+              onRewound: () => setOpen(false),
+              onRewindFailed: (text) => {
+                pendingRewindNotice = text
+                setOpen(true)
+              },
+              onProgress: (phase, sha) => setProgress({ phase, sha, fading: false }),
+              portalTo: host,
+              onDialogOpen: setDialogOpen,
+              onLanesChange: setActiveLanes,
+              initialNotice: pendingRewindNotice ?? undefined,
+              onInitialNoticeConsumed: () => { pendingRewindNotice = null },
+            }),
           ),
         )
       : null
@@ -2456,12 +2562,25 @@ export function apply(ctx: Context): void {
 
   // Zero-polling command bridge: register the /history command's durable chat
   // row. The command lifecycle (`command/run` with name 'history') is pushed to
-  // the client through the session projection stream; rendering this row means
-  // the command just ran, so open the HISTORY panel — same instant delivery the
-  // official command UI uses, no polling.
-  function HistoryCommandRow(props: { node?: { state?: { outcome?: unknown } } }): ReactNode {
-    useEffect(() => { setOpen(true) }, [])
-    const done = props.node?.state?.outcome !== undefined
+  // the client through the session projection stream. Only the first pending
+  // render claims the open action; completed rows are durable history and may
+  // be mounted again when the user revisits a session.
+  function HistoryCommandRow(props: {
+    node?: {
+      commandId?: unknown
+      outcome?: unknown
+    }
+    sessionId?: string
+  }): ReactNode {
+    const commandId = typeof props.node?.commandId === 'string' ? props.node.commandId : undefined
+    const commandKey = commandId === undefined ? undefined : `${props.sessionId ?? ''}:${commandId}`
+    const pending = props.node?.outcome === null
+    useEffect(() => {
+      // A completed command is historical data, not a fresh /history action.
+      if (!pending) return
+      if (claimHistoryCommand(props.sessionId, commandId)) setOpen(true)
+    }, [commandKey, commandId, props.sessionId, pending])
+    const done = props.node?.outcome !== null && props.node?.outcome !== undefined
     return createElement('div', {
       style: {
         display: 'flex',

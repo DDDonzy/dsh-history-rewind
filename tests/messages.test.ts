@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildSessionMessage, buildWorkspaceMessage, parseMessage, previewOf, PREVIEW_WIDTH } from '../src/messages.ts'
 import { deriveTurn } from '../src/snapshot.ts'
+import { claimHistoryCommand } from '../src/client/history-command.ts'
 
 test('session message: turn-start is a CHECK POINT (no preview, keeps ws)', () => {
   const message = buildSessionMessage({
@@ -167,4 +168,18 @@ test('parse rejects foreign subjects', () => {
   assert.equal(parseMessage('hello world'), null)
   assert.equal(parseMessage(''), null)
   assert.equal(parseMessage('[NOTATAG] foo'), null)
+})
+
+test('history command auto-open is claimed once per session and command', () => {
+  const session = `history-command-${Date.now()}-${Math.random()}`
+  assert.equal(claimHistoryCommand(session, 'cmd-1'), true)
+  assert.equal(claimHistoryCommand(session, 'cmd-1'), false)
+  assert.equal(claimHistoryCommand(session, 'cmd-2'), true)
+  assert.equal(claimHistoryCommand(`${session}-other`, 'cmd-1'), true)
+})
+
+test('history command without a stable command id never auto-opens', () => {
+  const session = `history-command-${Date.now()}-${Math.random()}`
+  assert.equal(claimHistoryCommand(session, undefined), false)
+  assert.equal(claimHistoryCommand(session, ''), false)
 })

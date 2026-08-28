@@ -285,30 +285,37 @@ export async function writeConfig(root: string, patch: Partial<HistoryRewindConf
 
 /**
  * Total bytes under one directory, following no symlinks and tolerating races.
- *
- * Entries that vanish mid-walk (a concurrent snapshot's temp file, a `gc` run
- * repacking objects) are skipped rather than thrown: this powers a usage
- * readout, so an approximate-but-alive number beats an exact-or-crash one.
+ * Sibling entries are measured in bounded parallel batches to reduce latency.
  * @param dir - directory to measure; a missing directory measures 0.
- * @returns total size in bytes (0 when the directory does not exist).
  */
+const SIZE_BATCH = 32
+
 async function dirSize(dir: string): Promise<number> {
-  let total = 0
-  const walk = async (current: string): Promise<void> => {
+  const walk = async (current: string): Promise<number> => {
     const entries = await readdir(current, { withFileTypes: true }).catch(() => null)
-    if (entries === null) return // absent or unreadable: contributes 0
-    for (const entry of entries) {
-      const child = join(current, entry.name)
-      try {
-        if (entry.isDirectory()) await walk(child)
-        else if (entry.isFile()) total += (await lstat(child)).size
-      } catch {
-        // Vanished between readdir and stat: skip it.
-      }
+    if (entries === null) return 0 // absent or unreadable: contributes 0
+
+    let total = 0
+    // Process siblings in bounded parallel batches: Git object directories can
+    // contain thousands of files, while unbounded Promise.all would overload
+    // the host with handles.
+    for (let start = 0; start < entries.length; start += SIZE_BATCH) {
+      const batch = entries.slice(start, start + SIZE_BATCH)
+      const sizes = await Promise.all(batch.map(async (entry) => {
+        const child = join(current, entry.name)
+        try {
+          if (entry.isDirectory()) return await walk(child)
+          if (entry.isFile()) return (await lstat(child)).size
+        } catch {
+          // Vanished between readdir and stat: skip it.
+        }
+        return 0
+      }))
+      total += sizes.reduce((sum, size) => sum + size, 0)
     }
+    return total
   }
-  await walk(dir)
-  return total
+  return walk(dir)
 }
 
 /** Shadow-store usage broken down by area, against the advisory capacity. */
@@ -354,82 +361,93 @@ export interface StoredSessionItem {
   backupsBytes: number
   totalBytes: number
   lastModified: number
+  /** False for the fast metadata-only list; true once sizes were measured. */
+  usageLoaded?: boolean
 }
 
-/**
- * List all sessions currently holding data in the shadow store, with their
- * per-area byte counts and last modified timestamps.
- * @param root - history root.
- * @returns sorted list of session items (newest first).
- */
-export async function listStoredSessions(root: string): Promise<StoredSessionItem[]> {
-  const ids = new Set<string>()
+/** Measure one stored session without scanning unrelated sessions. */
+async function measureStoredSession(root: string, sessionId: string, withUsage: boolean): Promise<StoredSessionItem> {
+  const sRepo = sessionRepoDir(root, sessionId)
+  const wsRepo = workspaceRepoDir(root, sessionId)
+  const sBackup = sessionBackupDir(root, sessionId)
+  const wsBackup = workspaceBackupDir(root, sessionId)
 
-  // 1. Scan repos/ for session-<id>.git
-  const reposEntries = await readdir(join(root, REPOS_DIRNAME)).catch(() => [])
-  for (const name of reposEntries) {
-    if (name.startsWith('session-') && name.endsWith('.git')) {
-      ids.add(name.slice('session-'.length, -'.git'.length))
-    }
-  }
-
-  // 2. Scan repos-ws/ for session-<seg>.git
-  const wsEntries = await readdir(join(root, REPOS_WS_DIRNAME)).catch(() => [])
-  for (const name of wsEntries) {
-    if (name.startsWith('session-') && name.endsWith('.git')) {
-      ids.add(name.slice('session-'.length, -'.git'.length))
-    }
-  }
-
-  // 3. Scan backups/ for session-<id> and ws-session-<seg>
-  const backupEntries = await readdir(join(root, BACKUPS_DIRNAME)).catch(() => [])
-  for (const name of backupEntries) {
-    if (name.startsWith('ws-session-')) {
-      ids.add(name.slice('ws-session-'.length))
-    } else if (name.startsWith('session-')) {
-      ids.add(name.slice('session-'.length))
-    }
-  }
-
-  const items: StoredSessionItem[] = []
-  for (const sessionId of ids) {
-    const sRepo = sessionRepoDir(root, sessionId)
-    const wsRepo = workspaceRepoDir(root, sessionId)
-    const sBackup = sessionBackupDir(root, sessionId)
-    const wsBackup = workspaceBackupDir(root, sessionId)
-
-    const [sessionBytes, workspaceBytes, sBackupBytes, wsBackupBytes] = await Promise.all([
+  let sessionBytes = 0
+  let workspaceBytes = 0
+  let sBackupBytes = 0
+  let wsBackupBytes = 0
+  if (withUsage) {
+    [sessionBytes, workspaceBytes, sBackupBytes, wsBackupBytes] = await Promise.all([
       dirSize(sRepo),
       dirSize(wsRepo),
       dirSize(sBackup),
       dirSize(wsBackup),
     ])
-
-    const backupsBytes = sBackupBytes + wsBackupBytes
-    const totalBytes = sessionBytes + workspaceBytes + backupsBytes
-
-    // Determine latest modified timestamp across existing dirs
-    let lastModified = 0
-    for (const dir of [sRepo, wsRepo, sBackup, wsBackup]) {
-      try {
-        const info = await stat(dir)
-        if (info.mtimeMs > lastModified) lastModified = info.mtimeMs
-      } catch {
-        // Not present, skip
-      }
-    }
-
-    items.push({
-      sessionId,
-      sessionBytes,
-      workspaceBytes,
-      backupsBytes,
-      totalBytes,
-      lastModified,
-    })
   }
 
+  // Directory stats are cheap and provide a useful sort order for the fast list.
+  let lastModified = 0
+  for (const dir of [sRepo, wsRepo, sBackup, wsBackup]) {
+    try {
+      const info = await stat(dir)
+      if (info.mtimeMs > lastModified) lastModified = info.mtimeMs
+    } catch {
+      // Not present, skip.
+    }
+  }
+
+  const backupsBytes = sBackupBytes + wsBackupBytes
+  return {
+    sessionId,
+    sessionBytes,
+    workspaceBytes,
+    backupsBytes,
+    totalBytes: sessionBytes + workspaceBytes + backupsBytes,
+    lastModified,
+    ...(withUsage ? { usageLoaded: true } : { usageLoaded: false }),
+  }
+}
+
+/**
+ * List all sessions currently holding data in the shadow store.
+ *
+ * The default remains the complete list for library compatibility. Pass false
+ * for the settings picker: it only scans top-level names and directory mtimes,
+ * leaving expensive recursive byte counts to per-session requests.
+ * @param root - history root.
+ * @param withUsage - whether to recursively measure every session.
+ * @returns sorted list of session items (newest first).
+ */
+export async function listStoredSessions(root: string, withUsage = true): Promise<StoredSessionItem[]> {
+  const ids = new Set<string>()
+
+  // Scan the three shallow index directories in parallel. No object files are
+  // touched in metadata-only mode.
+  const [reposEntries, wsEntries, backupEntries] = await Promise.all([
+    readdir(join(root, REPOS_DIRNAME)).catch(() => [] as string[]),
+    readdir(join(root, REPOS_WS_DIRNAME)).catch(() => [] as string[]),
+    readdir(join(root, BACKUPS_DIRNAME)).catch(() => [] as string[]),
+  ])
+  for (const name of reposEntries) {
+    if (name.startsWith('session-') && name.endsWith('.git')) ids.add(name.slice('session-'.length, -'.git'.length))
+  }
+  for (const name of wsEntries) {
+    if (name.startsWith('session-') && name.endsWith('.git')) ids.add(name.slice('session-'.length, -'.git'.length))
+  }
+  for (const name of backupEntries) {
+    if (name.startsWith('ws-session-')) ids.add(name.slice('ws-session-'.length))
+    else if (name.startsWith('session-')) ids.add(name.slice('session-'.length))
+  }
+
+  // Measure sessions concurrently so one large repository cannot block every
+  // later row. The picker uses withUsage=false and therefore stays lightweight.
+  const items = await Promise.all(Array.from(ids, (sessionId) => measureStoredSession(root, sessionId, withUsage)))
   return items.sort((a, b) => b.lastModified - a.lastModified)
+}
+
+/** Measure one session after its fast metadata row has already been shown. */
+export async function storedSessionUsage(root: string, sessionId: string): Promise<StoredSessionItem> {
+  return measureStoredSession(root, sessionId, true)
 }
 
 /** Outcome of one cache-clear request. */
