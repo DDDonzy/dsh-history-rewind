@@ -541,6 +541,7 @@ export const STYLES = [
   '  font-family: inherit;',
   '  font-size: 14px;',
   '  line-height: 22px;',
+  '  white-space: nowrap;',
   '  color: var(--dsw-alias-label-primary, #e6e6e6);',
   '  background: transparent;',
   '  cursor: pointer;',

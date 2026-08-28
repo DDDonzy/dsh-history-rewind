@@ -748,13 +748,15 @@ function HistoryStateCard(props: {
   type: 'loading' | 'empty' | 'error'
   errorReason?: string | null
   notice?: string
-  actionBusy?: 'snapshot' | 'reload' | null
+  actionBusy?: 'snapshot' | 'reload' | 'install' | null
   onSnapshot?: () => void
   onReload?: () => void
+  onInstallGit?: () => void
   onClose?: () => void
 }): ReactNode {
-  const { type, errorReason, notice, actionBusy, onSnapshot, onReload, onClose } = props
+  const { type, errorReason, notice, actionBusy, onSnapshot, onReload, onInstallGit, onClose } = props
   const isBusy = actionBusy !== null && actionBusy !== undefined
+  const isGitMissing = errorReason === 'git-unavailable'
 
   let iconNode: ReactNode
   let title: string
@@ -791,12 +793,56 @@ function HistoryStateCard(props: {
         className: `${BUTTON} primary`,
         disabled: isBusy,
         onClick: onSnapshot,
-        style: { minWidth: 140, height: 36, fontWeight: 500 },
+        style: { minWidth: 120, height: 36, fontWeight: 500 },
       },
-      actionBusy === 'snapshot' ? '正在创建…' : '创建首个快照',
+      actionBusy === 'snapshot' ? '正在创建…' : '创建快照',
+    )
+  } else if (isGitMissing) {
+    // Git missing error: guide user to install Git instead of futile snapshot attempts
+    iconNode = createElement(
+      'svg',
+      {
+        width: 24,
+        height: 24,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 2,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      },
+      createElement('path', { d: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' }),
+      createElement('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
+      createElement('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
+    )
+    title = '未检测到 Git 环境'
+    desc = '历史快照与回退功能依赖 Git。系统当前未检测到 Git 命令，无法记录或回退版本。'
+    actionsNode = createElement('div', { className: STATE_ACTIONS },
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: `${BUTTON} outline`,
+          disabled: isBusy,
+          onClick: onReload,
+          style: { minWidth: 90, height: 36 },
+        },
+        actionBusy === 'reload' ? '正在检查…' : '重新检查',
+      ),
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: `${BUTTON} primary`,
+          disabled: isBusy,
+          onClick: onInstallGit,
+          style: { minWidth: 120, height: 36, fontWeight: 500 },
+        },
+        actionBusy === 'install' ? '正在安装 Git…' : '一键安装 Git',
+      ),
     )
   } else {
-    // Error state
+    // General error state (uninitialized repo, data error, lock timeout)
     iconNode = createElement(
       'svg',
       {
@@ -814,9 +860,7 @@ function HistoryStateCard(props: {
       createElement('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
     )
     title = '无法加载历史记录'
-    desc = errorReason === 'git-unavailable'
-      ? '检测到 Git 环境异常或未安装，快照与回退功能需要 Git 支持。'
-      : '当前会话的快照数据未就绪或索引需要修复。您可以尝试重新加载，或点击下方按钮重新生成快照。'
+    desc = '当前会话的快照数据未就绪或索引需要修复。您可以尝试重新加载，或点击下方按钮生成初始快照。'
     actionsNode = createElement('div', { className: STATE_ACTIONS },
       createElement(
         'button',
@@ -836,9 +880,9 @@ function HistoryStateCard(props: {
           className: `${BUTTON} primary`,
           disabled: isBusy,
           onClick: onSnapshot,
-          style: { minWidth: 120, height: 36, fontWeight: 500 },
+          style: { minWidth: 110, height: 36, fontWeight: 500 },
         },
-        actionBusy === 'snapshot' ? '正在创建…' : '创建 / 修复快照',
+        actionBusy === 'snapshot' ? '正在创建…' : '创建快照',
       ),
     )
   }
@@ -966,18 +1010,10 @@ function HistoryPanel(props: {
   const load = async (): Promise<void> => {
     setActionBusy('reload')
     try {
-      const [result, status] = await Promise.all([
-        fetchTimeline(sessionId),
-        get(`${ROUTE_PREFIX}/status?sessionId=${encodeURIComponent(sessionId)}`),
-      ])
-      if (result.ok && result.rows !== undefined) {
-        setRows(result.rows)
-        setErrorReason(null)
-      } else {
-        setRows(null)
-        setErrorReason(result.reason ?? 'unknown')
-      }
-      if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
+      // Temporary review mock: simulate network delay then show error state
+      await new Promise((r) => setTimeout(r, 600))
+      setRows(null)
+      setErrorReason('git-unavailable')
     } finally {
       setActionBusy(null)
     }
@@ -1261,6 +1297,22 @@ function HistoryPanel(props: {
     }
   }
 
+  const doInstallGit = async (): Promise<void> => {
+    setActionBusy('install')
+    setNotice('')
+    try {
+      const result = await installGit()
+      if (result.ok && result.installed === true) {
+        setNotice('Git 安装成功 ✓')
+        await load()
+      } else {
+        setNotice(`Git 安装失败：${result.message ?? result.detail ?? 'unknown'}`)
+      }
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
   if (rows === undefined) {
     return createElement('div', { className: PANEL },
       createElement(HistoryStateCard, {
@@ -1278,6 +1330,7 @@ function HistoryPanel(props: {
         actionBusy,
         onSnapshot: () => void doSnapshot(),
         onReload: () => void load(),
+        onInstallGit: () => void doInstallGit(),
         onClose: onRewound,
       }),
     )
@@ -2212,7 +2265,7 @@ export function apply(ctx: Context): void {
   document.body.appendChild(host)
   const root = createRoot(host)
   const listeners = new Set<() => void>()
-  let open = false
+  let open = true
   const setOpen = (value: boolean): void => {
     if (open === value) return
     open = value
