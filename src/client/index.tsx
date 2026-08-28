@@ -11,7 +11,7 @@ import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMe
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
-  fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit,
+  fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit, getRewindStatus,
   getConfig, setConfig, setCacheCapacity, getCacheUsage, clearCache, getCacheSessions, getCacheSessionUsage,
   type TimelineRow, type CacheScope, type CacheUsageResult, type StoredSession,
 } from './api.ts'
@@ -78,7 +78,11 @@ interface ScopeRecordLike {
 /** Structural view of the client sessions service */
 interface SessionsFace {
   list: {
-    getSnapshot(): { current?: string; ids?: string[] }
+    getSnapshot(): {
+      current?: string
+      ids?: string[]
+      byId?: Record<string, { running?: boolean }>
+    }
     subscribe(listener: () => void): () => void
   }
   clear?(): void
@@ -769,6 +773,8 @@ let suppressingSessionId: string | null = null
 /** History Panel */
 function HistoryPanel(props: {
   sessionId: string
+  /** Current client projection of the Agent running bit (authoritative live feed). */
+  isSessionRunning: () => boolean | undefined
   rebind: (sessionId: string) => Promise<string>
   /** Close the panel (immediately on a confirmed rewind). */
   onRewound: () => void
@@ -790,13 +796,15 @@ function HistoryPanel(props: {
   onInitialNoticeConsumed?: () => void
 }) {
   const {
-    sessionId, rebind, onRewound, onRewindFailed, onProgress, portalTo,
+    sessionId, isSessionRunning, rebind, onRewound, onRewindFailed, onProgress, portalTo,
     onDialogOpen, onLanesChange, initialNotice, onInitialNoticeConsumed,
   } = props
   const [rows, setRows] = useState<TimelineRow[] | null | undefined>(undefined)
   const [head, setHead] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [selected, setSelected] = useState<TimelineRow | null>(null)
+  const [rewindGuardNotice, setRewindGuardNotice] = useState<string | null>(null)
+  const selectionGuardRun = useRef(0)
   const [notice, setNotice] = useState<string>(initialNotice ?? '')
   const [errorLog, setErrorLog] = useState<string | null>(null)
   // A failure notice pushed while the panel was closed arrives through the
@@ -810,7 +818,7 @@ function HistoryPanel(props: {
 
   // While the rewind dialog is open, the shell hides the panel card; report the
   // open/close transition so the shell can re-show it on cancel.
-  const dialogOpen = selected !== null
+  const dialogOpen = selected !== null || rewindGuardNotice !== null
   useEffect(() => {
     onDialogOpen(dialogOpen)
   }, [dialogOpen, onDialogOpen])
@@ -819,11 +827,13 @@ function HistoryPanel(props: {
   useEffect(() => {
     if (!dialogOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setSelected(null)
+      if (event.key !== 'Escape') return
+      if (rewindGuardNotice !== null) setRewindGuardNotice(null)
+      else setSelected(null)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [dialogOpen])
+  }, [dialogOpen, rewindGuardNotice])
   /** Row currently hovered (sha), for ancestor-path highlight. */
   const [hoverSha, setHoverSha] = useState<string | null>(null)
   /** Live geometry of the painted rows, feeding the single graph overlay: each
@@ -884,12 +894,41 @@ function HistoryPanel(props: {
     return () => { timelineLoadRun.current += 1 }
   }, [sessionId])
   useEffect(() => () => {
+    selectionGuardRun.current += 1
     // Clear any pending hover-delay timer on unmount.
     if (hoverTimer.current !== null) {
       clearTimeout(hoverTimer.current)
       hoverTimer.current = null
     }
   }, [])
+
+  const selectRewindTarget = async (target: TimelineRow): Promise<void> => {
+    const projectedRunning = isSessionRunning()
+    if (projectedRunning === true) {
+      setSelected(null)
+      setRewindGuardNotice('当前会话正在执行任务。请等待任务结束，或先终止任务后再次尝试。')
+      return
+    }
+    if (projectedRunning === false) {
+      setRewindGuardNotice(null)
+      setSelected(target)
+      return
+    }
+
+    // Compatibility fallback for older session clients without list.byId. A
+    // missing endpoint (old Host/new Client version skew) must not permanently
+    // lock the UI; the existing rewindSession running guard remains authoritative.
+    const run = ++selectionGuardRun.current
+    const status = await getRewindStatus(sessionId)
+    if (run !== selectionGuardRun.current) return
+    if (status.ok && status.running) {
+      setSelected(null)
+      setRewindGuardNotice('当前会话正在执行任务。请等待任务结束，或先终止任务后再次尝试。')
+      return
+    }
+    setRewindGuardNotice(null)
+    setSelected(target)
+  }
 
   const graph = useMemo(() => (rows === undefined || rows === null ? null : buildGraph(rows, head)), [rows, head])
   const headSha = head
@@ -1430,13 +1469,7 @@ function HistoryPanel(props: {
             // and the right-hand time + sha column.
             chipBudget: Math.max(120, (listWidth > 0 ? listWidth : 820) - graph!.lanes * LANE_W - 8 - 32 - 150),
             onHover,
-            onSelect: (target) => {
-              if (selected?.sha === target.sha) {
-                setSelected(null)
-              } else {
-                setSelected(target)
-              }
-            },
+            onSelect: (target) => { void selectRewindTarget(target) },
             anchor: row.sha === headSha,
           }),
         ),
@@ -1457,6 +1490,51 @@ function HistoryPanel(props: {
           : null,
       ),
     ),
+
+    // Running-session safety notice. The timeline card never reaches the rewind
+    // confirmation while its agent is still executing a task.
+    rewindGuardNotice !== null
+      ? createPortal(
+          createElement('div', {
+            className: MODAL_BACKDROP,
+            style: {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 10001,
+              padding: 16,
+              background: 'transparent',
+              backdropFilter: 'none',
+            },
+            onClick: () => setRewindGuardNotice(null),
+          },
+            createElement('div', {
+              className: DIALOG,
+              style: { margin: 0, animation: 'dshSlideUp 0.15s ease-out' },
+              onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+            },
+              createElement('div', { className: DIALOG_HEAD },
+                createElement('h2', { className: DIALOG_TITLE }, '暂时无法回档'),
+                createElement('button', {
+                  type: 'button',
+                  className: DIALOG_CLOSE,
+                  title: '关闭',
+                  onClick: () => setRewindGuardNotice(null),
+                }, '✕'),
+              ),
+              createElement('p', { className: DIALOG_DESCRIPTION }, rewindGuardNotice),
+              createElement('div', { className: DIALOG_FOOT },
+                createElement('button', {
+                  type: 'button',
+                  className: `${BUTTON} outline`,
+                  onClick: () => setRewindGuardNotice(null),
+                  style: { minWidth: 80 },
+                }, '确定'),
+              ),
+            ),
+          ),
+          portalTo,
+        )
+      : null,
 
     // Selected Row Rewind Dialog — portaled into the plugin's own root so the
     // panel card can be hidden while it is open (the dialog floats over the
@@ -2631,6 +2709,7 @@ export function apply(ctx: Context): void {
           },
             createElement(HistoryPanel, {
               sessionId,
+              isSessionRunning: () => svc.list.getSnapshot().byId?.[sessionId]?.running,
               rebind: (id) => rebindView(svc, id),
               onRewound: () => setOpen(false),
               onRewindFailed: (text) => {

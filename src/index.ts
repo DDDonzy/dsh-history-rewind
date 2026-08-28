@@ -143,6 +143,19 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
+      // GET /rewind-status?sessionId= — lightweight safety gate used before a
+      // timeline card opens its rewind dialog. No Git or filesystem work.
+      if (pathname === `${ROUTE_PREFIX}/rewind-status` && method === 'GET') {
+        const sessionId = url.searchParams.get('sessionId')
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          json(res, 400, { ok: false, reason: 'bad-args' })
+          return
+        }
+        const status = engine.agents?.get(sessionId)?.status
+        json(res, 200, { ok: true, running: status === 'running', status: status ?? null })
+        return
+      }
+
       // GET /status?sessionId= — minimal repo facts for the view header.
       if (pathname === `${ROUTE_PREFIX}/status`) {
         const sessionId = url.searchParams.get('sessionId')

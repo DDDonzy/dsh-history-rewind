@@ -171,6 +171,25 @@ export async function fetchTimeline(sessionId: string): Promise<TimelineResult> 
   }
 }
 
+export interface RewindStatusResult {
+  ok: boolean
+  running: boolean
+  status?: string | null
+  reason?: string
+}
+
+/** Check whether a session is currently running before opening rewind UI. */
+export async function getRewindStatus(sessionId: string): Promise<RewindStatusResult> {
+  const data = await get(`${ROUTE_PREFIX}/rewind-status?sessionId=${encodeURIComponent(sessionId)}`)
+  if (data === null) return { ok: false, running: false, reason: 'transport' }
+  return {
+    ok: data.ok === true,
+    running: data.running === true,
+    ...(typeof data.status === 'string' || data.status === null ? { status: data.status as string | null } : {}),
+    ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
+  }
+}
+
 /** Rewind one session to a timeline commit (session + optional workspace). */
 export async function rewind(
   sessionId: string,
