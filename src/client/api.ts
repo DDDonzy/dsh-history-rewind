@@ -33,6 +33,8 @@ export interface TimelineRow {
 export interface TimelineResult {
   ok: boolean
   reason?: string
+  error?: string
+  detail?: string
   rows?: TimelineRow[]
 }
 
@@ -157,7 +159,7 @@ export async function get(path: string): Promise<Record<string, unknown> | null>
 /** Fetch the git-graph timeline for one session. */
 export async function fetchTimeline(sessionId: string): Promise<TimelineResult> {
   const data = await get(`${ROUTE_PREFIX}/timeline?sessionId=${encodeURIComponent(sessionId)}`)
-  if (data === null) return { ok: false, reason: 'transport' }
+  if (data === null) return { ok: false, reason: 'transport', error: '网络请求失败或插件服务无响应 (Transport Error)' }
   const rows = Array.isArray(data.rows)
     ? (data.rows as unknown[]).filter((row) => row !== null && typeof row === 'object')
         .map((row) => row as TimelineRow)
@@ -165,6 +167,8 @@ export async function fetchTimeline(sessionId: string): Promise<TimelineResult> 
   return {
     ok: data.ok === true,
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
+    ...(typeof data.error === 'string' ? { error: data.error } : {}),
+    ...(typeof data.detail === 'string' ? { detail: data.detail } : {}),
     ...(rows !== undefined ? { rows } : {}),
   }
 }

@@ -42,6 +42,7 @@ import {
   DIALOG_HEAD,
   DIALOG_TITLE,
   DIALOG_CLOSE,
+  DIALOG_BODY,
   DIALOG_DESCRIPTION,
   DIALOG_FOOT,
   HINT,
@@ -54,16 +55,6 @@ import {
   LIST_WRAP,
   PROGRESS_MASK,
   PROGRESS_CARD,
-  STATE_CONTAINER,
-  STATE_CARD,
-  STATE_CLOSE,
-  STATE_ICON,
-  STATE_SPIN,
-  STATE_TITLE,
-  STATE_DESC,
-  STATE_ERROR_TAG,
-  STATE_ACTIONS,
-  STATE_NOTICE,
 } from './styles.ts'
 
 /** Services the browser half requires before it can contribute. */
@@ -743,179 +734,6 @@ type RewindPhase = 'working' | 'refreshing' | 'done' | 'idle'
  *  and stopping the chat view from jumping to the initial blank hero page. */
 let suppressingSessionId: string | null = null
 
-/** State card for Loading / Empty / Error views with actions and visual clarity */
-function HistoryStateCard(props: {
-  type: 'loading' | 'empty' | 'error'
-  errorReason?: string | null
-  notice?: string
-  actionBusy?: 'snapshot' | 'reload' | 'install' | null
-  onSnapshot?: () => void
-  onReload?: () => void
-  onInstallGit?: () => void
-  onClose?: () => void
-}): ReactNode {
-  const { type, errorReason, notice, actionBusy, onSnapshot, onReload, onInstallGit, onClose } = props
-  const isBusy = actionBusy !== null && actionBusy !== undefined
-  const isGitMissing = errorReason === 'git-unavailable'
-
-  let iconNode: ReactNode
-  let title: string
-  let desc: string
-  let actionsNode: ReactNode = null
-
-  if (type === 'loading') {
-    iconNode = createElement('div', { className: STATE_SPIN })
-    title = '正在读取会话历史…'
-    desc = '正在解析 Git 影子快照与时间线拓扑'
-  } else if (type === 'empty') {
-    iconNode = createElement(
-      'svg',
-      {
-        width: 24,
-        height: 24,
-        viewBox: '0 0 24 24',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 2,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-      },
-      createElement('circle', { cx: 12, cy: 12, r: 3 }),
-      createElement('path', { d: 'M3 12h6m6 0h6' }),
-      createElement('path', { d: 'M12 3a9 9 0 1 0 9 9' }),
-    )
-    title = '当前会话暂无快照记录'
-    desc = '发送消息后，TURN 开始与结束将自动记录代码与对话快照。你也可以随时点击下方按钮立即创建首个快照。'
-    actionsNode = createElement(
-      'button',
-      {
-        type: 'button',
-        className: `${BUTTON} primary`,
-        disabled: isBusy,
-        onClick: onSnapshot,
-        style: { minWidth: 120, height: 36, fontWeight: 500 },
-      },
-      actionBusy === 'snapshot' ? '正在创建…' : '创建快照',
-    )
-  } else if (isGitMissing) {
-    // Git missing error: guide user to install Git instead of futile snapshot attempts
-    iconNode = createElement(
-      'svg',
-      {
-        width: 24,
-        height: 24,
-        viewBox: '0 0 24 24',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 2,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-      },
-      createElement('path', { d: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' }),
-      createElement('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
-      createElement('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
-    )
-    title = '未检测到 Git 环境'
-    desc = '历史快照与回退功能依赖 Git。系统当前未检测到 Git 命令，无法记录或回退版本。'
-    actionsNode = createElement('div', { className: STATE_ACTIONS },
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: `${BUTTON} outline`,
-          disabled: isBusy,
-          onClick: onReload,
-          style: { minWidth: 90, height: 36 },
-        },
-        actionBusy === 'reload' ? '正在检查…' : '重新检查',
-      ),
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: `${BUTTON} primary`,
-          disabled: isBusy,
-          onClick: onInstallGit,
-          style: { minWidth: 120, height: 36, fontWeight: 500 },
-        },
-        actionBusy === 'install' ? '正在安装 Git…' : '一键安装 Git',
-      ),
-    )
-  } else {
-    // General error state (uninitialized repo, data error, lock timeout)
-    iconNode = createElement(
-      'svg',
-      {
-        width: 24,
-        height: 24,
-        viewBox: '0 0 24 24',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 2,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-      },
-      createElement('path', { d: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' }),
-      createElement('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
-      createElement('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
-    )
-    title = '无法加载历史记录'
-    desc = '当前会话的快照数据未就绪或索引需要修复。您可以尝试重新加载，或点击下方按钮生成初始快照。'
-    actionsNode = createElement('div', { className: STATE_ACTIONS },
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: `${BUTTON} outline`,
-          disabled: isBusy,
-          onClick: onReload,
-          style: { minWidth: 90, height: 36 },
-        },
-        actionBusy === 'reload' ? '正在加载…' : '重新加载',
-      ),
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: `${BUTTON} primary`,
-          disabled: isBusy,
-          onClick: onSnapshot,
-          style: { minWidth: 110, height: 36, fontWeight: 500 },
-        },
-        actionBusy === 'snapshot' ? '正在创建…' : '创建快照',
-      ),
-    )
-  }
-
-  const isNoticeSuccess = notice?.includes('✓') ?? false
-  const isNoticeError = (notice?.includes('失败') || notice?.includes('异常')) ?? false
-
-  return createElement('div', { className: STATE_CONTAINER },
-    createElement('div', { className: STATE_CARD },
-      onClose !== undefined
-        ? createElement('button', {
-            type: 'button',
-            className: STATE_CLOSE,
-            title: '关闭 (Esc)',
-            onClick: onClose,
-          }, '✕')
-        : null,
-      createElement('div', { className: `${STATE_ICON} is-${type}` }, iconNode),
-      createElement('div', { className: STATE_TITLE }, title),
-      errorReason !== null && errorReason !== undefined && type === 'error'
-        ? createElement('div', { className: STATE_ERROR_TAG }, `错误代码: ${errorReason}`)
-        : null,
-      createElement('div', { className: STATE_DESC }, desc),
-      actionsNode,
-      notice !== undefined && notice !== ''
-        ? createElement('div', {
-            className: `${STATE_NOTICE}${isNoticeSuccess ? ' is-success' : isNoticeError ? ' is-error' : ''}`,
-          }, notice)
-        : null,
-    ),
-  )
-}
-
 /** History Panel */
 function HistoryPanel(props: {
   sessionId: string
@@ -944,10 +762,8 @@ function HistoryPanel(props: {
     onDialogOpen, onLanesChange, initialNotice, onInitialNoticeConsumed,
   } = props
   const [rows, setRows] = useState<TimelineRow[] | null | undefined>(undefined)
-  const [errorReason, setErrorReason] = useState<string | null>(null)
   const [head, setHead] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [actionBusy, setActionBusy] = useState<'snapshot' | 'reload' | null>(null)
   const [selected, setSelected] = useState<TimelineRow | null>(null)
   const [notice, setNotice] = useState<string>(initialNotice ?? '')
   // A failure notice pushed while the panel was closed arrives through the
@@ -1007,24 +823,31 @@ function HistoryPanel(props: {
     }, 500)
   }
 
+  const [loadError, setLoadError] = useState<string | null>(null)
+
   const load = async (): Promise<void> => {
-    setActionBusy('reload')
-    try {
-      const [result, status] = await Promise.all([
-        fetchTimeline(sessionId),
-        get(`${ROUTE_PREFIX}/status?sessionId=${encodeURIComponent(sessionId)}`),
-      ])
-      if (result.ok && result.rows !== undefined) {
-        setRows(result.rows)
-        setErrorReason(null)
-      } else {
-        setRows(null)
-        setErrorReason(result.reason ?? 'unknown')
-      }
-      if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
-    } finally {
-      setActionBusy(null)
+    const [result, status] = await Promise.all([
+      fetchTimeline(sessionId),
+      get(`${ROUTE_PREFIX}/status?sessionId=${encodeURIComponent(sessionId)}`),
+    ])
+    if (result.ok && result.rows !== undefined) {
+      setRows(result.rows)
+      setLoadError(null)
+    } else {
+      setRows(null)
+      const errDetail = result.detail ? `\n详情: ${result.detail}` : ''
+      const errText = result.error
+        ? `${result.error}${errDetail}`
+        : result.reason === 'git-unavailable'
+        ? 'Git 环境不可用：未检测到系统 Git 安装，无法读取快照。'
+        : result.reason === 'transport'
+        ? '网络传输异常：无法连接至插件服务或请求超时。'
+        : result.reason
+        ? `错误代码: ${result.reason}${errDetail}`
+        : '时间线数据读取异常（未初始化或数据异常）'
+      setLoadError(errText)
     }
+    if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
   }
   useEffect(() => { void load() }, [sessionId])
   useEffect(() => () => {
@@ -1039,7 +862,7 @@ function HistoryPanel(props: {
   const headSha = head
 
   useEffect(() => {
-    if (graph !== null && graph.rows.length > 0) {
+    if (graph !== null) {
       onLanesChange?.(graph.lanes)
     } else {
       onLanesChange?.(0)
@@ -1289,69 +1112,124 @@ function HistoryPanel(props: {
     setNotice(`已恢复工作区 ✓ ${selected.sha.slice(0, 7)} 的配对快照`)
   }
 
-  const doSnapshot = async (): Promise<void> => {
-    setActionBusy('snapshot')
-    setNotice('')
-    try {
-      const result = await manualSnapshot(sessionId)
-      if (result.ok) {
-        setNotice(`已快照 ✓ ${result.snap ?? ''}`)
-        await load()
-      } else {
-        setNotice(`快照失败：${result.reason ?? 'unknown'}`)
-      }
-    } finally {
-      setActionBusy(null)
-    }
-  }
-
-  const doInstallGit = async (): Promise<void> => {
-    setActionBusy('install')
-    setNotice('')
-    try {
-      const result = await installGit()
-      if (result.ok && result.installed === true) {
-        setNotice('Git 安装成功 ✓')
-        await load()
-      } else {
-        setNotice(`Git 安装失败：${result.message ?? result.detail ?? 'unknown'}`)
-      }
-    } finally {
-      setActionBusy(null)
-    }
-  }
-
   if (rows === undefined) {
-    return createElement('div', { className: PANEL },
-      createElement(HistoryStateCard, {
-        type: 'loading',
-        onClose: onRewound,
-      }),
-    )
+    return createElement('div', {
+      className: PANEL,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100%',
+        color: 'var(--dsw-alias-label-secondary, #888)',
+        fontSize: 13,
+      },
+    }, '正在读取会话历史…')
   }
   if (rows === null) {
-    return createElement('div', { className: PANEL },
-      createElement(HistoryStateCard, {
-        type: 'error',
-        errorReason,
-        notice,
-        actionBusy,
-        onSnapshot: () => void doSnapshot(),
-        onReload: () => void load(),
-        onInstallGit: () => void doInstallGit(),
-        onClose: onRewound,
-      }),
+    return createElement('div', {
+      className: PANEL,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100%',
+        padding: 24,
+      },
+    },
+      createElement('div', {
+        className: DIALOG,
+        style: {
+          margin: 'auto',
+          animation: 'dshSlideUp 0.15s ease-out',
+          width: 'min(460px, 94vw)',
+        },
+        onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+      },
+        createElement('div', { className: DIALOG_HEAD },
+          createElement('h2', { className: DIALOG_TITLE }, '读取会话历史失败'),
+          createElement('button', {
+            className: DIALOG_CLOSE,
+            title: '关闭',
+            onClick: () => onRewound(),
+          }, '✕'),
+        ),
+        createElement('div', {
+          className: DIALOG_BODY,
+          style: { display: 'flex', flexDirection: 'column', gap: 10 },
+        },
+          createElement('p', {
+            className: DIALOG_DESCRIPTION,
+            style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary, #999)', padding: 0 },
+          }, '读取当前会话快照时间线时发生异常：'),
+          createElement('pre', {
+            style: {
+              margin: 0,
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: 'var(--dsw-alias-markdown-code-block, #18181a)',
+              border: '1px solid var(--dsw-alias-border-l1, rgba(255,255,255,0.08))',
+              color: 'var(--dsw-alias-state-error-primary, #f87171)',
+              fontFamily: 'var(--ds-font-family-code, monospace)',
+              fontSize: 12,
+              lineHeight: 1.5,
+              maxHeight: 180,
+              overflowY: 'auto',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              userSelect: 'text',
+            },
+          }, loadError ?? '未知错误（未初始化或数据异常）'),
+        ),
+        createElement('div', { className: DIALOG_FOOT },
+          createElement('button', {
+            className: `${BUTTON} primary`,
+            onClick: () => onRewound(),
+          }, '确定'),
+        ),
+      ),
     )
   }
   if (rows.length === 0) {
-    return createElement('div', { className: PANEL },
-      createElement(HistoryStateCard, {
-        type: 'empty',
-        notice,
-        actionBusy,
-        onSnapshot: () => void doSnapshot(),
-        onClose: onRewound,
-      }),
+    return createElement('div', {
+      className: PANEL,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100%',
+        padding: 24,
+      },
+    },
+      createElement('div', {
+        className: DIALOG,
+        style: {
+          margin: 'auto',
+          animation: 'dshSlideUp 0.15s ease-out',
+          width: 'min(420px, 94vw)',
+        },
+        onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+      },
+        createElement('div', { className: DIALOG_HEAD },
+          createElement('h2', { className: DIALOG_TITLE }, '暂无快照'),
+          createElement('button', {
+            className: DIALOG_CLOSE,
+            title: '关闭',
+            onClick: () => onRewound(),
+          }, '✕'),
+        ),
+        createElement('div', { className: DIALOG_BODY, style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+          createElement('p', {
+            className: DIALOG_DESCRIPTION,
+            style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.6, padding: 0 },
+          }, '当前会话尚未产生快照记录。发送消息后，TURN 开始与结束将自动为您记录快照。'),
+        ),
+        createElement('div', { className: DIALOG_FOOT },
+          createElement('button', {
+            className: `${BUTTON} primary`,
+            onClick: () => onRewound(),
+          }, '确定'),
+        ),
+      ),
     )
   }
 
@@ -2446,8 +2324,9 @@ export function apply(ctx: Context): void {
                 left: `${sessionBounds.left + sessionBounds.width / 2}px`,
                 // Shift left by exactly half of the graph gutter (graphWidth + row gap)
                 // so the card content (excluding git graph) is perfectly centered on A (conversation center).
-                // When there are no graph lanes (empty / error / loading), offset is 0 for true center alignment.
-                transform: `translateX(calc(-50% - ${activeLanes > 0 ? (graphWidth(activeLanes) + 12) / 2 : 0}px))`,
+                transform: activeLanes > 0
+                  ? `translateX(calc(-50% - ${(graphWidth(activeLanes) + 12) / 2}px))`
+                  : 'translateX(-50%)',
                 width: `min(860px, ${Math.max(300, sessionBounds.width - 48)}px)`,
               } : {}),
               ...(dialogOpen ? { display: 'none' } : {}),
