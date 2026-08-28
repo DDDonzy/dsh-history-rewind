@@ -137,10 +137,7 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
           json(res, 200, { ok: true, rows: [] })
           return
         }
-        // Workspace cwd drives the paired ws-snapshot diff for CHECK POINT rows.
-        const session = engine.sessions?.get(sessionId)
-        const workspaceCwd = session?.header?.cwd ?? null
-        const rows = await timelineRows(engine.subprocess, repoDir, sessionId, engine.root, workspaceCwd)
+        const rows = await timelineRows(engine.subprocess, repoDir, sessionId, engine.root)
         if (rows === null) json(res, 200, { ok: false, reason: 'git-unavailable' })
         else json(res, 200, { ok: true, rows })
         return

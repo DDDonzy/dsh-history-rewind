@@ -7,7 +7,7 @@
 import { open, mkdir, stat, unlink, readFile, writeFile, readdir, rm, lstat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import {
   HISTORY_ROOT_DIRNAME, REPOS_DIRNAME, REPOS_WS_DIRNAME,
   BACKUPS_DIRNAME, LOCKS_DIRNAME, LOCK_STALE_MS,
@@ -361,8 +361,71 @@ export interface StoredSessionItem {
   backupsBytes: number
   totalBytes: number
   lastModified: number
+  /** Visible session title from DSH's projection cache. */
+  title?: string
+  /** Workspace directory name shown beside the session title. */
+  workspace?: string
+  /** Active road tip (latest road ref, otherwise main), when resolvable. */
+  commit?: string
   /** False for the fast metadata-only list; true once sizes were measured. */
   usageLoaded?: boolean
+}
+
+/** Read branch tips directly from loose/packed refs without spawning Git. */
+async function storedSessionCommit(repoDir: string): Promise<string | undefined> {
+  const refs = new Map<string, string>()
+  const headsDir = join(repoDir, 'refs', 'heads')
+  const looseNames = await readdir(headsDir).catch(() => [] as string[])
+  await Promise.all(looseNames.map(async (name) => {
+    const value = await readFile(join(headsDir, name), 'utf8').catch(() => '')
+    const sha = value.trim().split(/\s+/)[0] ?? ''
+    if (/^[0-9a-f]{40}$/i.test(sha)) refs.set(name, sha)
+  }))
+
+  const packed = await readFile(join(repoDir, 'packed-refs'), 'utf8').catch(() => '')
+  for (const line of packed.split('\n')) {
+    if (line.length === 0 || line.startsWith('#') || line.startsWith('^')) continue
+    const match = /^([0-9a-f]{40}) refs\/heads\/(.+)$/i.exec(line.trim())
+    if (match !== null && !refs.has(match[2]!)) refs.set(match[2]!, match[1]!)
+  }
+
+  let latestRoad: { timestamp: number; sha: string } | undefined
+  for (const [name, sha] of refs) {
+    if (!name.startsWith('road-')) continue
+    const timestamp = Number(name.slice('road-'.length))
+    if (Number.isFinite(timestamp) && (latestRoad === undefined || timestamp > latestRoad.timestamp)) {
+      latestRoad = { timestamp, sha }
+    }
+  }
+  return latestRoad?.sha ?? refs.get('main')
+}
+
+/** Read the same persisted title/cwd projection that backs DSH's session list. */
+async function storedSessionPresentation(
+  root: string,
+  sessionId: string,
+): Promise<{ title?: string; workspace?: string }> {
+  const path = join(dirname(root), 'storages', 'session_projcache', 'sessions', `${sessionId}.json`)
+  const text = await readFile(path, 'utf8').catch(() => '')
+  if (text.length === 0) return {}
+  try {
+    const parsed = JSON.parse(text) as {
+      record?: {
+        identity?: { cwd?: unknown }
+        rows?: { title?: { val?: unknown } }
+      }
+    }
+    const rawTitle = parsed.record?.rows?.title?.val
+    const rawCwd = parsed.record?.identity?.cwd
+    const title = typeof rawTitle === 'string' && rawTitle.trim().length > 0 ? rawTitle.trim() : undefined
+    const workspace = typeof rawCwd === 'string' && rawCwd.length > 0 ? basename(rawCwd) : undefined
+    return {
+      ...(title === undefined ? {} : { title }),
+      ...(workspace === undefined || workspace.length === 0 ? {} : { workspace }),
+    }
+  } catch {
+    return {}
+  }
 }
 
 /** Measure one stored session without scanning unrelated sessions. */
@@ -371,6 +434,8 @@ async function measureStoredSession(root: string, sessionId: string, withUsage: 
   const wsRepo = workspaceRepoDir(root, sessionId)
   const sBackup = sessionBackupDir(root, sessionId)
   const wsBackup = workspaceBackupDir(root, sessionId)
+  const commitPromise = storedSessionCommit(sRepo)
+  const presentationPromise = storedSessionPresentation(root, sessionId)
 
   let sessionBytes = 0
   let workspaceBytes = 0
@@ -397,6 +462,7 @@ async function measureStoredSession(root: string, sessionId: string, withUsage: 
   }
 
   const backupsBytes = sBackupBytes + wsBackupBytes
+  const [commit, presentation] = await Promise.all([commitPromise, presentationPromise])
   return {
     sessionId,
     sessionBytes,
@@ -404,6 +470,8 @@ async function measureStoredSession(root: string, sessionId: string, withUsage: 
     backupsBytes,
     totalBytes: sessionBytes + workspaceBytes + backupsBytes,
     lastModified,
+    ...presentation,
+    ...(commit === undefined ? {} : { commit }),
     ...(withUsage ? { usageLoaded: true } : { usageLoaded: false }),
   }
 }

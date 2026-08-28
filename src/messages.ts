@@ -31,7 +31,18 @@
  * working); only the NEW format is produced.
  */
 
+import { Buffer } from 'node:buffer'
+import { deflateRawSync, inflateRawSync } from 'node:zlib'
+
 export type SnapKind = 'turn-start' | 'turn-end' | 'manual' | 'rewind'
+
+export type WorkspaceChangeStatus = 'A' | 'M' | 'D'
+
+/** One workspace path changed by the snapshot relative to its parent tree. */
+export interface WorkspaceChange {
+  status: WorkspaceChangeStatus
+  path: string
+}
 
 /** Parsed commit-message payload (only leaf scalars; owned JSON). */
 export interface SnapMeta {
@@ -61,6 +72,8 @@ export interface SnapMeta {
   userMessage?: string
   /** Assistant message preview that closed this turn (turn-end only). */
   asstMessage?: string
+  /** Workspace A/M/D manifest captured with this snapshot. */
+  changes?: WorkspaceChange[]
 }
 
 /** Max display width of a message preview (CJK counts 2, ASCII 1 → 100 CJK ≈ 200 ASCII). */
@@ -124,6 +137,40 @@ function asstPreviewOf(meta: SnapMeta): string {
   return previewOf(meta.asstMessage ?? meta.message ?? '')
 }
 
+const FILES_MARKER = /\[F1:([A-Za-z0-9_-]+)\]$/
+
+/** Encode file changes into a subject-safe, versioned tail marker. */
+function fileChangesSuffix(changes: readonly WorkspaceChange[] | undefined): string {
+  if (changes === undefined || changes.length === 0) return ''
+  const tuples = changes.map((change) => [change.status, change.path])
+  const compressed = deflateRawSync(Buffer.from(JSON.stringify(tuples), 'utf8'))
+  return `[F1:${compressed.toString('base64url')}]`
+}
+
+/** Remove and decode the optional file manifest before parsing the base subject. */
+function splitFileChanges(subject: string): { subject: string; changes?: WorkspaceChange[] } {
+  const match = FILES_MARKER.exec(subject)
+  if (match === null) return { subject }
+  const base = subject.slice(0, match.index)
+  try {
+    const bytes = Buffer.from(match[1]!, 'base64url')
+    const parsed = JSON.parse(inflateRawSync(bytes).toString('utf8')) as unknown
+    if (!Array.isArray(parsed)) return { subject: base }
+    const changes: WorkspaceChange[] = []
+    for (const entry of parsed) {
+      if (!Array.isArray(entry) || entry.length !== 2) return { subject: base }
+      const [status, path] = entry
+      if ((status !== 'A' && status !== 'M' && status !== 'D') || typeof path !== 'string' || path.length === 0) {
+        return { subject: base }
+      }
+      changes.push({ status, path })
+    }
+    return changes.length === 0 ? { subject: base } : { subject: base, changes }
+  } catch {
+    return { subject: base }
+  }
+}
+
 /**
  * Build one session-side commit message (always single line — git subjects
  * carry no newline; the Web UI splits turn-end into two display lines).
@@ -137,10 +184,11 @@ export function buildSessionMessage(meta: SnapMeta): string {
   if (meta.kind === 'rewind') return `[REWIND → ${meta.target ?? ''}]`
   const ws = meta.ws !== undefined && meta.ws.length > 0 ? meta.ws : ''
   const head = `[${turnField(meta.turn)}]`
-  if (meta.kind === 'manual') return `${head}[MANUAL][${ws}]`
-  if (meta.kind === 'turn-start') return `${head}[CHECK POINT][${ws}]`
-  // turn-end: single line — [TURN n][USER] <preview>[ASST] <preview>[<ws>].
-  return `${head}[USER] ${userPreviewOf(meta)}[ASST] ${asstPreviewOf(meta)}[${ws}]`
+  let subject: string
+  if (meta.kind === 'manual') subject = `${head}[MANUAL][${ws}]`
+  else if (meta.kind === 'turn-start') subject = `${head}[CHECK POINT][${ws}]`
+  else subject = `${head}[USER] ${userPreviewOf(meta)}[ASST] ${asstPreviewOf(meta)}[${ws}]`
+  return `${subject}${fileChangesSuffix(meta.changes)}`
 }
 
 /**
@@ -163,8 +211,10 @@ export function buildWorkspaceMessage(meta: SnapMeta): string {
  * @returns parsed metadata, or null when the subject carries no contract line.
  */
 export function parseMessage(subject: string): SnapMeta | null {
-  const line = subject.trim()
-  return parseBracket(line) ?? parseLegacy(line)
+  const split = splitFileChanges(subject.trim())
+  const meta = parseBracket(split.subject) ?? parseLegacy(split.subject)
+  if (meta === null) return null
+  return split.changes === undefined ? meta : { ...meta, changes: split.changes }
 }
 
 /** Parse the new bracket format. */

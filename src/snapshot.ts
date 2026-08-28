@@ -370,6 +370,8 @@ export async function takeSnapshot(
   const [ws, baseBlob, rootTreeSha] = await Promise.all([wsPromise, baseBlobPromise, rootTreePromise])
   if (rootTreeSha === null) return { ok: false, reason: 'mktree-failed' }
   const wsCommit: string | undefined = ws.ok && ws.commit !== undefined ? ws.commit : undefined
+  const workspaceChanges = ws.ok ? ws.changes : undefined
+  const workspaceChanged = (workspaceChanges?.length ?? 0) > 0
   // Workspace failure never blocks the session snapshot: an orphan snap
   // renders in the timeline and the next snapshot re-pairs.
 
@@ -402,7 +404,7 @@ export async function takeSnapshot(
     // anchor — "before you sent turn N+1" — so it must NOT be deduped away by
     // byte-equality on the linear path. (The fromJump semantic compare below
     // still runs, so a rewind never spawns a spurious duplicate node.)
-    if (firstLine(baseBlob.stdout) === blobSha && !(kind === 'turn-start' && !fromJump)) {
+    if (firstLine(baseBlob.stdout) === blobSha && !workspaceChanged && !(kind === 'turn-start' && !fromJump)) {
       // 内容与 base 相同（字节级）：什么都不产生。
       // 例外：普通续聊的 USER(turn-start) 节点即使与上一条 ASST 字节相同，
       // 也是一个独立的时间线锚点（"发送本回合消息之前"），必须提交；
@@ -411,7 +413,7 @@ export async function takeSnapshot(
     }
     // 字节不同但可能是「跳转后仅追加了 resume 记账事件」：解码做语义比较。
     // 仅对跳转场景启用（普通续聊没有记账尾，字节不同即真变化）。
-    if (fromJump && base !== undefined) {
+    if (fromJump && base !== undefined && !workspaceChanged) {
       const scratchCmp = join(root, 'backups', `scratchcmp-${sessionId}-${Date.now()}`)
       try {
         await mkdir(scratchCmp, { recursive: true })
@@ -438,8 +440,8 @@ export async function takeSnapshot(
     }
   }
 
-  const message = buildSessionMessage({ ...meta, base, ws: wsCommit })
-  const committed = await runGit(subprocess, argvCommitTree(sessionRepo, rootTreeSha, message, base), root, env)
+  const message = buildSessionMessage({ ...meta, base, ws: wsCommit, changes: workspaceChanges })
+  const committed = await runGit(subprocess, argvCommitTree(sessionRepo, rootTreeSha, base), root, env, message)
   if (committed.exitCode !== 0) return { ok: false, reason: 'commit-failed' }
   const commit = firstLine(committed.stdout)
   if (commit.length === 0) return { ok: false, reason: 'commit-empty' }

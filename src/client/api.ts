@@ -4,6 +4,7 @@
  */
 
 import { ROUTE_PREFIX } from '../constants.ts'
+import type { WorkspaceChange } from '../messages.ts'
 
 /** One timeline row as served by the Host (owned JSON). */
 export interface TimelineRow {
@@ -11,8 +12,8 @@ export interface TimelineRow {
   parents: string[]
   subject: string
   ct: number
-  /** Basenames changed by the paired workspace snapshot (turn-start/turn-end). */
-  files?: string[]
+  /** A/M/D paths embedded by the session snapshot. */
+  files?: WorkspaceChange[]
   meta: {
     kind: 'turn-start' | 'turn-end' | 'manual' | 'rewind'
     turn?: number
@@ -26,6 +27,7 @@ export interface TimelineRow {
     message?: string
     userMessage?: string
     asstMessage?: string
+    changes?: WorkspaceChange[]
   } | null
 }
 
@@ -328,7 +330,10 @@ export interface StoredSession {
   backupsBytes: number
   totalBytes: number
   title?: string
+  workspace?: string
   lastModified: number
+  /** Active road tip (latest road, otherwise main). */
+  commit?: string
   /** False while the per-session recursive size scan is still running. */
   usageLoaded?: boolean
   /** True when the per-session size request failed. */

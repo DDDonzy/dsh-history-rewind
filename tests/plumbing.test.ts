@@ -314,6 +314,75 @@ test('turn-start (USER) commits even when byte-identical to the prior ASST (line
   await rm(root, { recursive: true, force: true })
 })
 
+test('manual snapshot records workspace-only changes even when session bytes are unchanged', async () => {
+  const subprocess = fakeSubprocess()
+  const root = await mkdtemp(join(tmpdir(), 'dsh-history-test-'))
+  const cwd = join(root, 'ws')
+  const historyRoot = join(root, 'history')
+  const officialDir = join(root, 'sessions', '--E-test--', 'session-manual-files')
+  const official = join(officialDir, 'session.jsonl.zstd')
+  const repoDir = join(historyRoot, 'repos', 'session-manual-files.git')
+  await mkdir(officialDir, { recursive: true })
+  await mkdir(cwd, { recursive: true })
+  await writeFile(join(cwd, '.gitignore'), '.git\n')
+  await writeFile(join(cwd, 'code.ts'), 'v1')
+  await writeFile(official, Buffer.from('same-conversation'))
+  const session: SessionLike = { id: 'manual-files', header: { cwd } }
+  const persistence: PersistenceLike = { locate: () => ({ kind: 'jsonl', path: official }) }
+
+  const first = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'manual' })
+  assert.equal(first.ok, true)
+  await writeFile(join(cwd, 'code.ts'), 'v2')
+  const second = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'manual' })
+  assert.equal(second.ok, true)
+  assert.ok(second.commit, 'workspace-only change creates a session timeline commit')
+  assert.equal(second.unchanged, undefined)
+
+  const rows = await timelineRows(subprocess, repoDir, session.id, historyRoot)
+  const row = rows?.find((item) => item.sha === second.commit)
+  assert.deepEqual(row?.files, [{ status: 'M', path: 'code.ts' }])
+  await rm(root, { recursive: true, force: true })
+})
+
+test('timeline reads embedded A/M/D files without querying workspace history', async () => {
+  const base = fakeSubprocess()
+  let workspaceLogs = 0
+  const subprocess = {
+    spawn(spec: Parameters<typeof base.spawn>[0]) {
+      if (spec.argv.includes('log') && spec.argv.includes('--name-only')) workspaceLogs += 1
+      return base.spawn(spec)
+    },
+  }
+  const root = await mkdtemp(join(tmpdir(), 'dsh-history-test-'))
+  const cwd = join(root, 'ws')
+  const historyRoot = join(root, 'history')
+  const officialDir = join(root, 'sessions', '--E-test--', 'session-timeline-files')
+  const official = join(officialDir, 'session.jsonl.zstd')
+  const repoDir = join(historyRoot, 'repos', 'session-timeline-files.git')
+  await mkdir(officialDir, { recursive: true })
+  await mkdir(cwd, { recursive: true })
+  await writeFile(join(cwd, '.gitignore'), '.git\n')
+  await writeFile(join(cwd, 'changed.txt'), 'one')
+  await writeFile(official, Buffer.from('conversation'))
+  const session: SessionLike = { id: 'timeline-files', header: { cwd } }
+  const persistence: PersistenceLike = { locate: () => ({ kind: 'jsonl', path: official }) }
+  const snap = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-start', seq: 1 })
+  assert.equal(snap.ok, true)
+
+  workspaceLogs = 0
+  const rows = await timelineRows(subprocess, repoDir, session.id, historyRoot)
+  assert.ok(rows !== null)
+  assert.equal(workspaceLogs, 0, 'timeline never scans workspace history')
+  assert.ok(rows.some((row) => row.files?.some(
+    (change) => change.status === 'A' && change.path === 'changed.txt',
+  ) === true))
+  assert.equal(rows.some((row) => row.subject.includes('[F1:')), false, 'encoded marker is hidden from row subject')
+
+  await timelineRows(subprocess, repoDir, session.id, historyRoot)
+  assert.equal(workspaceLogs, 0, 'reopening still uses only the session log')
+  await rm(root, { recursive: true, force: true })
+})
+
 test('timeline parse: road fork shape', async () => {
   const subprocess = fakeSubprocess()
   const root = await mkdtemp(join(tmpdir(), 'dsh-history-test-'))

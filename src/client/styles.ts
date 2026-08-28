@@ -481,7 +481,7 @@ export const STYLES = [
   '  background: #c8c8ce;',
   '  white-space: nowrap;',
   '}',
-  '/* Overflow indicator ("+N"): same mark, dimmed so it reads as a count. */',
+  '/* Overflow indicator ("…N"): same mark, dimmed so it reads as a count. */',
   '.dsh-history-file-chip.is-more {',
   '  color: #2e2e36;',
   '  background: rgba(200, 200, 206, 0.58);',

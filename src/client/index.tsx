@@ -16,6 +16,7 @@ import {
   type TimelineRow, type CacheScope, type CacheUsageResult, type StoredSession,
 } from './api.ts'
 import { ROUTE_PREFIX, SETTINGS_NAMESPACE, CACHE_WARN_RATIO, CACHE_FULL_RATIO } from '../constants.ts'
+import type { WorkspaceChange } from '../messages.ts'
 import { claimHistoryCommand } from './history-command.ts'
 import { buildGraph, roadSet, type GraphRow } from './layout.ts'
 import {
@@ -206,8 +207,8 @@ const chipWidth = (text: string): number => text.length * CHIP_CHAR_W + CHIP_PAD
  * Decide how many changed-file chips fit within `budget` pixels.
  *
  * There is no fixed cap: long file names simply mean fewer chips. Whatever does
- * not fit collapses into a trailing "+N" chip, and that chip's own width is
- * reserved before committing to a count — so the "+N" can never be the thing
+ * not fit collapses into a trailing "…N" chip, and that chip's own width is
+ * reserved before committing to a count — so the "…N" can never be the thing
  * that overflows the line. At least one chip is always shown (truncated by CSS
  * if a single name is wider than the whole row) so the line is never empty.
  *
@@ -215,15 +216,27 @@ const chipWidth = (text: string): number => text.length * CHIP_CHAR_W + CHIP_PAD
  * @param budget - horizontal space available to the chip line, in px.
  * @returns the chips to render plus how many were dropped.
  */
-function fitFileChips(files: string[], budget: number): { shown: string[]; hidden: number } {
+/** User-facing status marker and basename for one workspace change. */
+function fileChangeText(change: WorkspaceChange): string {
+  const symbol = change.status === 'A' ? '+' : change.status === 'D' ? '-' : '·'
+  const name = change.path.split(/[/\\]/).pop() ?? change.path
+  return `${symbol} ${name}`
+}
+
+function fileChangeTitle(change: WorkspaceChange): string {
+  const symbol = change.status === 'A' ? '+' : change.status === 'D' ? '-' : '·'
+  return `${symbol} ${change.path}`
+}
+
+function fitFileChips(files: WorkspaceChange[], budget: number): { shown: WorkspaceChange[]; hidden: number } {
   if (files.length === 0) return { shown: [], hidden: 0 }
   let used = 0
   let count = 0
   for (let i = 0; i < files.length; i++) {
-    const next = chipWidth(files[i]!) + (count > 0 ? CHIP_GAP_W : 0)
+    const next = chipWidth(fileChangeText(files[i]!)) + (count > 0 ? CHIP_GAP_W : 0)
     const rest = files.length - (i + 1)
-    // Reserve room for the "+N" chip when files would still remain after this one.
-    const reserve = rest > 0 ? CHIP_GAP_W + chipWidth(`+${rest}`) : 0
+    // Reserve room for the "…N" chip when files would still remain after this one.
+    const reserve = rest > 0 ? CHIP_GAP_W + chipWidth(`…${rest}`) : 0
     if (count > 0 && used + next + reserve > budget) break
     used += next
     count++
@@ -233,10 +246,10 @@ function fitFileChips(files: string[], budget: number): { shown: string[]; hidde
 }
 
 /** Render a changed-file chip line: as many names as fit on one line, then a
- *  trailing "+N". With `indent` (TURN rows) a leading spacer shifts the chips to
+ *  trailing "…N". With `indent` (TURN rows) a leading spacer shifts the chips to
  *  the message TEXT column — the line aligns with the USER/ASST content, not
  *  the badges. */
-function FileChips(props: { files: string[]; indent?: boolean; budget: number }): ReactNode {
+function FileChips(props: { files: WorkspaceChange[]; indent?: boolean; budget: number }): ReactNode {
   const { files, indent = false, budget } = props
   if (files.length === 0) return null
   const { shown, hidden } = fitFileChips(files, budget)
@@ -244,10 +257,17 @@ function FileChips(props: { files: string[]; indent?: boolean; budget: number })
     ...(indent ? [createElement('span', { className: FILE_INDENT }, null)] : []),
     createElement('div', { className: FILE_CLIP },
       shown.map((file) =>
-        createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
+        createElement('code', {
+          className: FILE_CHIP,
+          title: fileChangeTitle(file),
+          key: `${file.status}:${file.path}`,
+        }, fileChangeText(file)),
       ),
       hidden > 0
-        ? createElement('code', { className: `${FILE_CHIP} is-more`, title: files.slice(shown.length).join('\n') }, `+${hidden}`)
+        ? createElement('code', {
+            className: `${FILE_CHIP} is-more`,
+            title: files.slice(shown.length).map(fileChangeTitle).join('\n'),
+          }, `…${hidden}`)
         : null,
     ),
   )
@@ -281,10 +301,17 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean; chipBudget: num
           createElement('span', { className: 'dsh-badge dsh-badge-turn-start' }, 'WORKSPACE'),
           createElement('div', { className: FILE_CLIP },
             shown.map((file) =>
-              createElement('code', { className: FILE_CHIP, title: file, key: file }, file),
+              createElement('code', {
+                className: FILE_CHIP,
+                title: fileChangeTitle(file),
+                key: `${file.status}:${file.path}`,
+              }, fileChangeText(file)),
             ),
             hidden > 0
-              ? createElement('code', { className: `${FILE_CHIP} is-more`, title: files.slice(shown.length).join('\n') }, `+${hidden}`)
+              ? createElement('code', {
+                  className: `${FILE_CHIP} is-more`,
+                  title: files.slice(shown.length).map(fileChangeTitle).join('\n'),
+                }, `…${hidden}`)
               : null,
           ),
         ),
@@ -806,7 +833,7 @@ function HistoryPanel(props: {
   const listWrapRef = useRef<HTMLDivElement | null>(null)
   const [graphGeom, setGraphGeom] = useState<{ rows: Record<string, RowGeom>; height: number }>({ rows: {}, height: 0 })
   /** Painted width of the list, so the chip line knows how many file names it
-   *  can fit before collapsing the rest into "+N". Zero reads are ignored for
+   *  can fit before collapsing the rest into "…N". Zero reads are ignored for
    *  the same reason as the row geometry: a hidden panel measures 0. */
   const [listWidth, setListWidth] = useState(0)
   /** 500ms hover-delay timer: the graph only switches to the hovered path
@@ -829,12 +856,18 @@ function HistoryPanel(props: {
     }, 500)
   }
 
+  const timelineLoadRun = useRef(0)
   const load = async (): Promise<void> => {
+    const run = ++timelineLoadRun.current
     const [result, status] = await Promise.all([
       fetchTimeline(sessionId),
       get(`${ROUTE_PREFIX}/status?sessionId=${encodeURIComponent(sessionId)}`),
     ])
+    if (run !== timelineLoadRun.current) return
+    if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
     if (result.ok && result.rows !== undefined) {
+      // Rows already contain their A/M/D manifests. One state update paints the
+      // final card heights; there is no background file-info reflow.
       setRows(result.rows)
       setErrorLog(null)
     } else {
@@ -845,9 +878,11 @@ function HistoryPanel(props: {
           : `[timeline-error]: network transport error or host service unavailable`
       )
     }
-    if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
   }
-  useEffect(() => { void load() }, [sessionId])
+  useEffect(() => {
+    void load()
+    return () => { timelineLoadRun.current += 1 }
+  }, [sessionId])
   useEffect(() => () => {
     // Clear any pending hover-delay timer on unmount.
     if (hoverTimer.current !== null) {
@@ -1671,18 +1706,10 @@ function GitignoreTemplateCard(): ReactNode {
         : null,
       createElement('button', {
         type: 'button',
+        className: `${BUTTON} outline`,
         disabled: saving || !loaded,
         onClick: () => void doSave(),
-        style: {
-          padding: '6px 18px',
-          borderRadius: 6,
-          border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-          background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
-          color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-          fontSize: 12,
-          fontWeight: 500,
-          cursor: saving ? 'default' : 'pointer',
-        },
+        style: { minWidth: 88 },
       }, saving ? '保存中…' : '保存'),
     ),
   )
@@ -1717,6 +1744,7 @@ function CacheCard(): ReactNode {
   const [dialogStep, setDialogStep] = useState<'closed' | 'sessions' | 'scope'>('closed')
   const [sessionsList, setSessionsList] = useState<StoredSession[]>([])
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set())
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set())
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [clearing, setClearing] = useState(false)
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1757,6 +1785,7 @@ function CacheCard(): ReactNode {
     setLoadingSessions(true)
     setSessionsList([])
     setSelectedSessionIds(new Set())
+    setCollapsedWorkspaces(new Set())
     setDialogStep('sessions')
     const r = await getCacheSessions()
     if (run !== sessionUsageRun.current) return
@@ -1813,6 +1842,139 @@ function CacheCard(): ReactNode {
     .filter((s) => selectedSessionIds.has(s.sessionId))
     .reduce((acc, s) => acc + s.totalBytes, 0)
   const selectedUsagePending = sessionsList.some((s) => selectedSessionIds.has(s.sessionId) && s.usageLoaded !== true)
+  const sessionGroups = useMemo(() => {
+    const grouped = new Map<string, StoredSession[]>()
+    for (const session of sessionsList) {
+      const workspace = session.workspace?.trim() || '未知工作区'
+      const group = grouped.get(workspace)
+      if (group === undefined) grouped.set(workspace, [session])
+      else group.push(session)
+    }
+    return Array.from(grouped, ([workspace, sessions]) => ({
+      workspace,
+      sessions: sessions.slice().sort((a, b) => {
+        const byTime = b.lastModified - a.lastModified
+        if (byTime !== 0) return byTime
+        return (a.title ?? '').localeCompare(b.title ?? '', undefined, { numeric: true, sensitivity: 'base' })
+      }),
+    })).sort((a, b) => a.workspace.localeCompare(b.workspace, undefined, { numeric: true, sensitivity: 'base' }))
+  }, [sessionsList])
+
+  const toggleWorkspace = (workspace: string): void => {
+    setCollapsedWorkspaces((current) => {
+      const next = new Set(current)
+      if (next.has(workspace)) next.delete(workspace)
+      else next.add(workspace)
+      return next
+    })
+  }
+
+  const setWorkspaceSelected = (sessions: StoredSession[], selected: boolean): void => {
+    setSelectedSessionIds((current) => {
+      const next = new Set(current)
+      for (const session of sessions) {
+        if (selected) next.add(session.sessionId)
+        else next.delete(session.sessionId)
+      }
+      return next
+    })
+  }
+
+  const renderSessionRow = (s: StoredSession): ReactNode => {
+    const checked = selectedSessionIds.has(s.sessionId)
+    return createElement('label', {
+      key: s.sessionId,
+      style: {
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 8,
+        padding: '8px 10px',
+        borderRadius: 6,
+        cursor: 'pointer',
+        background: checked ? 'rgba(255,255,255,0.06)' : 'transparent',
+        userSelect: 'none',
+        transition: 'background 0.12s ease',
+      },
+    },
+      createElement('input', {
+        type: 'checkbox',
+        checked,
+        style: { margin: '3px 0 0', flex: 'none' },
+        onChange: (e: { target: { checked: boolean } }) => {
+          const next = new Set(selectedSessionIds)
+          if (e.target.checked) next.add(s.sessionId)
+          else next.delete(s.sessionId)
+          setSelectedSessionIds(next)
+        },
+      }),
+      createElement('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 },
+      },
+        createElement('div', {
+          style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, minWidth: 0 },
+        },
+          createElement('span', {
+            style: {
+              minWidth: 0,
+              flex: 1,
+              fontSize: 12,
+              color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+              fontWeight: 500,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            },
+            title: s.title ?? '未命名会话',
+          }, s.title ?? '未命名会话'),
+          createElement('span', {
+            style: {
+              fontSize: 11,
+              fontFamily: 'var(--ds-font-family-code, monospace)',
+              color: 'var(--dsw-alias-label-secondary, #aaa)',
+              flex: 'none',
+            },
+          }, s.usageLoaded !== true
+            ? '统计中…'
+            : s.usageError === true ? '读取失败' : formatBytes(s.totalBytes)),
+        ),
+        createElement('div', {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            minWidth: 0,
+            color: 'var(--dsw-alias-label-tertiary, #777)',
+            fontSize: 10,
+            lineHeight: '14px',
+          },
+        },
+          createElement('code', {
+            style: {
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              fontFamily: 'var(--ds-font-family-code, monospace)',
+            },
+            title: s.sessionId,
+          }, s.sessionId),
+          createElement('span', { style: { flex: 'none', opacity: 0.65 } }, '|'),
+          createElement('code', {
+            style: { flex: 'none', fontFamily: 'var(--ds-font-family-code, monospace)' },
+            title: s.commit,
+          }, s.commit?.slice(0, 7) ?? '-------'),
+          createElement('span', {
+            style: { flex: 'none', marginLeft: 'auto', whiteSpace: 'nowrap' },
+            title: s.lastModified > 0 ? new Date(s.lastModified).toLocaleString() : '',
+          }, s.lastModified > 0
+            ? new Date(s.lastModified).toLocaleString([], {
+                month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+              })
+            : '—'),
+        ),
+      ),
+    )
+  }
 
   return createElement('div', {
     style: { display: 'flex', flexDirection: 'column', gap: 8, width: '100%', flex: 'none' },
@@ -1903,48 +2065,34 @@ function CacheCard(): ReactNode {
         : createElement('span', null),
       createElement('button', {
         type: 'button',
+        className: `${BUTTON} outline`,
         disabled: !loaded || clearing,
         onClick: () => void openClearFlow(),
-        style: {
-          padding: '5px 16px',
-          borderRadius: 6,
-          border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-          background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
-          color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-          fontSize: 12,
-          fontWeight: 500,
-          cursor: clearing ? 'default' : 'pointer',
-        },
+        style: { minWidth: 104 },
       }, clearing ? '清理中…' : '清理缓存'),
     ),
 
     // Dialog flow: Step 1 = select sessions; Step 2 = select scope
     dialogStep !== 'closed'
       ? createElement('div', {
+          className: MODAL_BACKDROP,
           style: {
-            position: 'fixed',
-            inset: 0,
             zIndex: 10001,
             background: 'rgba(0,0,0,0.45)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
+            backdropFilter: 'none',
           },
           onClick: () => { if (!clearing) setDialogStep('closed') },
         },
           dialogStep === 'sessions'
             ? createElement('div', {
+                className: DIALOG,
                 onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
                 style: {
-                  width: 'min(480px, 94vw)',
-                  display: 'flex',
-                  flexDirection: 'column',
+                  width: 'min(560px, 94vw)',
+                  maxHeight: 'min(680px, 90vh)',
                   gap: 12,
                   padding: 20,
-                  borderRadius: 14,
-                  border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                  background: 'var(--dsw-specific-sidebar-fill, #202021)',
-                  boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+                  animation: 'dshSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
                 },
               },
                 createElement('div', {
@@ -2009,65 +2157,104 @@ function CacheCard(): ReactNode {
                     ? createElement('div', { style: { padding: 24, textAlign: 'center', color: '#999', fontSize: 12 } }, '正在读取会话列表中…')
                     : sessionsList.length === 0
                     ? createElement('div', { style: { padding: 24, textAlign: 'center', color: '#999', fontSize: 12 } }, '当前没有存储任何会话快照')
-                    : sessionsList.map((s) => {
-                        const checked = selectedSessionIds.has(s.sessionId)
-                        return createElement('label', {
-                          key: s.sessionId,
-                          style: {
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 10,
-                            padding: '6px 8px',
-                            borderRadius: 6,
-                            cursor: 'pointer',
-                            background: checked ? 'rgba(255,255,255,0.06)' : 'transparent',
-                            userSelect: 'none',
-                            transition: 'background 0.12s ease',
-                          },
+                    : sessionGroups.map((group) => {
+                        const collapsed = collapsedWorkspaces.has(group.workspace)
+                        const selectedCount = group.sessions.reduce(
+                          (count, session) => count + (selectedSessionIds.has(session.sessionId) ? 1 : 0),
+                          0,
+                        )
+                        const allSelected = group.sessions.length > 0 && selectedCount === group.sessions.length
+                        const partiallySelected = selectedCount > 0 && !allSelected
+                        return createElement('div', {
+                          key: group.workspace,
+                          style: { display: 'flex', flexDirection: 'column', gap: 2 },
                         },
-                          createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 } },
+                          createElement('div', {
+                            style: {
+                              display: 'flex',
+                              alignItems: 'center',
+                              width: '100%',
+                              minHeight: 28,
+                              padding: '4px 8px',
+                              boxSizing: 'border-box',
+                              borderRadius: 6,
+                              background: 'rgba(255,255,255,0.035)',
+                              color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                            },
+                          },
                             createElement('input', {
                               type: 'checkbox',
-                              checked,
-                              onChange: (e: { target: { checked: boolean } }) => {
-                                const next = new Set(selectedSessionIds)
-                                if (e.target.checked) next.add(s.sessionId)
-                                else next.delete(s.sessionId)
-                                setSelectedSessionIds(next)
+                              checked: allSelected,
+                              ref: (node: HTMLInputElement | null): void => {
+                                if (node !== null) node.indeterminate = partiallySelected
                               },
+                              title: allSelected ? `取消选择 ${group.workspace} 的全部会话` : `选择 ${group.workspace} 的全部会话`,
+                              'aria-label': allSelected ? `取消选择 ${group.workspace}` : `选择 ${group.workspace}`,
+                              onChange: (event: { target: { checked: boolean } }) => {
+                                setWorkspaceSelected(group.sessions, event.target.checked)
+                              },
+                              style: { margin: '0 8px 0 0', flex: 'none', cursor: 'pointer' },
                             }),
-                            createElement('div', { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
+                            createElement('button', {
+                              type: 'button',
+                              'aria-expanded': !collapsed,
+                              title: collapsed ? `展开 ${group.workspace}` : `收起 ${group.workspace}`,
+                              onClick: () => toggleWorkspace(group.workspace),
+                              style: {
+                                display: 'flex',
+                                alignItems: 'center',
+                                minWidth: 0,
+                                flex: 1,
+                                minHeight: 20,
+                                padding: 0,
+                                border: 0,
+                                background: 'transparent',
+                                color: 'inherit',
+                                cursor: 'pointer',
+                                textAlign: 'left',
+                              },
+                            },
                               createElement('span', {
                                 style: {
-                                  fontSize: 12,
-                                  color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-                                  fontWeight: 500,
-                                  whiteSpace: 'nowrap',
+                                  width: 18,
+                                  flex: 'none',
+                                  font: '600 14px/18px var(--ds-font-family-code, monospace)',
+                                  color: 'var(--dsw-alias-label-secondary, #aaa)',
+                                },
+                              }, collapsed ? '+' : '−'),
+                              createElement('span', {
+                                style: {
+                                  minWidth: 0,
                                   overflow: 'hidden',
                                   textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                  fontSize: 12,
+                                  fontWeight: 600,
                                 },
-                                title: s.title || s.sessionId,
-                              }, s.title || s.sessionId),
+                              }, group.workspace),
                               createElement('span', {
                                 style: {
+                                  marginLeft: 'auto',
+                                  paddingLeft: 8,
+                                  flex: 'none',
                                   fontSize: 10,
                                   color: 'var(--dsw-alias-label-tertiary, #777)',
-                                  fontFamily: 'var(--ds-font-family-code, monospace)',
                                 },
-                              }, `${s.sessionId.slice(0, 8)} · ${s.lastModified > 0 ? new Date(s.lastModified).toLocaleDateString() : ''}`),
+                              }, String(group.sessions.length)),
                             ),
                           ),
-                          createElement('span', {
-                            style: {
-                              fontSize: 11,
-                              fontFamily: 'var(--ds-font-family-code, monospace)',
-                              color: 'var(--dsw-alias-label-secondary, #aaa)',
-                              flex: 'none',
-                            },
-                          }, s.usageLoaded !== true
-                            ? '统计中…'
-                            : s.usageError === true ? '读取失败' : formatBytes(s.totalBytes)),
+                          collapsed
+                            ? null
+                            : createElement('div', {
+                                style: {
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 2,
+                                  marginLeft: 16,
+                                  paddingLeft: 8,
+                                  borderLeft: '1px solid var(--dsw-alias-border-l1, rgba(255,255,255,0.08))',
+                                },
+                              }, group.sessions.map(renderSessionRow)),
                         )
                       }),
                 ),
@@ -2076,47 +2263,27 @@ function CacheCard(): ReactNode {
                 createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 4 } },
                   createElement('button', {
                     type: 'button',
+                    className: `${BUTTON} outline`,
                     onClick: () => setDialogStep('closed'),
-                    style: {
-                      padding: '6px 16px',
-                      borderRadius: 6,
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-secondary, #999)',
-                      fontSize: 12,
-                      cursor: 'pointer',
-                    },
+                    style: { minWidth: 80 },
                   }, '取消'),
                   createElement('button', {
                     type: 'button',
+                    className: `${BUTTON} outline`,
                     disabled: selectedSessionIds.size === 0,
                     onClick: () => setDialogStep('scope'),
-                    style: {
-                      padding: '6px 18px',
-                      borderRadius: 6,
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                      background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
-                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: selectedSessionIds.size === 0 ? 'default' : 'pointer',
-                      opacity: selectedSessionIds.size === 0 ? 0.5 : 1,
-                    },
+                    style: { minWidth: 80 },
                   }, '确定'),
                 ),
               )
             : createElement('div', {
+                className: DIALOG,
                 onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
                 style: {
                   width: 'min(460px, 92vw)',
-                  display: 'flex',
-                  flexDirection: 'column',
                   gap: 14,
                   padding: 20,
-                  borderRadius: 14,
-                  border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                  background: 'var(--dsw-specific-sidebar-fill, #202021)',
-                  boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+                  animation: 'dshSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
                 },
               },
                 createElement('div', {
@@ -2129,19 +2296,16 @@ function CacheCard(): ReactNode {
                 createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
                   createElement('button', {
                     type: 'button',
+                    className: `${BUTTON} outline`,
                     disabled: clearing,
                     onClick: () => void doClear('session'),
                     style: {
-                      display: 'flex',
+                      height: 'auto',
                       flexDirection: 'column',
                       alignItems: 'flex-start',
                       gap: 2,
                       padding: '8px 12px',
                       borderRadius: 8,
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-                      cursor: clearing ? 'default' : 'pointer',
                       textAlign: 'left',
                     },
                   },
@@ -2150,19 +2314,16 @@ function CacheCard(): ReactNode {
                   ),
                   createElement('button', {
                     type: 'button',
+                    className: `${BUTTON} outline`,
                     disabled: clearing,
                     onClick: () => void doClear('workspace'),
                     style: {
-                      display: 'flex',
+                      height: 'auto',
                       flexDirection: 'column',
                       alignItems: 'flex-start',
                       gap: 2,
                       padding: '8px 12px',
                       borderRadius: 8,
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-                      cursor: clearing ? 'default' : 'pointer',
                       textAlign: 'left',
                     },
                   },
@@ -2171,17 +2332,14 @@ function CacheCard(): ReactNode {
                   ),
                   createElement('button', {
                     type: 'button',
+                    className: `${BUTTON} outline`,
                     disabled: clearing,
                     onClick: () => void doClear('both'),
                     style: {
-                      display: 'flex',
-                      alignItems: 'center',
+                      height: 'auto',
+                      justifyContent: 'flex-start',
                       padding: '10px 12px',
                       borderRadius: 8,
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-                      cursor: clearing ? 'default' : 'pointer',
                       textAlign: 'left',
                     },
                   },
@@ -2191,31 +2349,16 @@ function CacheCard(): ReactNode {
                 createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
                   createElement('button', {
                     type: 'button',
+                    className: `${BUTTON} outline`,
                     disabled: clearing,
                     onClick: () => setDialogStep('sessions'),
-                    style: {
-                      padding: '6px 12px',
-                      borderRadius: 6,
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-secondary, #999)',
-                      fontSize: 12,
-                      cursor: clearing ? 'default' : 'pointer',
-                    },
                   }, '← 上一步'),
                   createElement('button', {
                     type: 'button',
+                    className: `${BUTTON} outline`,
                     disabled: clearing,
                     onClick: () => setDialogStep('closed'),
-                    style: {
-                      padding: '6px 16px',
-                      borderRadius: 6,
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-secondary, #999)',
-                      fontSize: 12,
-                      cursor: clearing ? 'default' : 'pointer',
-                    },
+                    style: { minWidth: 80 },
                   }, '取消'),
                 ),
               ),

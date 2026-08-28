@@ -128,6 +128,30 @@ test('preview round-trips through parse safely even with tricky content', () => 
   }
 })
 
+test('workspace A/M/D manifest round-trips through a subject-safe marker', () => {
+  const changes = [
+    { status: 'A' as const, path: 'src/新增 file.ts' },
+    { status: 'M' as const, path: 'README.md' },
+    { status: 'D' as const, path: 'old/[draft].txt' },
+  ]
+  const message = buildSessionMessage({
+    kind: 'turn-end', turn: 3, phase: 'end', userMessage: 'question', asstMessage: 'answer', ws: 'abcd', changes,
+  })
+  assert.match(message, /\[F1:[A-Za-z0-9_-]+\]$/)
+  const meta = parseMessage(message)
+  assert.deepEqual(meta?.changes, changes)
+  assert.equal(meta?.userMessage, 'question')
+  assert.equal(meta?.asstMessage, 'answer')
+
+  const many = Array.from({ length: 10_000 }, (_, index) => ({
+    status: (index % 3 === 0 ? 'A' : index % 3 === 1 ? 'M' : 'D') as 'A' | 'M' | 'D',
+    path: `src/generated/module-${index}/file-${index}.ts`,
+  }))
+  const large = buildSessionMessage({ kind: 'manual', turn: 4, ws: 'large', changes: many })
+  assert.equal(parseMessage(large)?.changes?.length, many.length)
+  assert.ok(large.length < JSON.stringify(many).length, 'manifest is compressed before entering the commit subject')
+})
+
 test('deriveTurn: empty history -> turn 1 on start', () => {
   assert.equal(deriveTurn([], 'start'), 1)
 })

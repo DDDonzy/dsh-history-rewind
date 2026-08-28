@@ -210,6 +210,32 @@ test('metadata-only session list is fast and per-session usage loads separately'
   await cleanup()
 })
 
+test('session list exposes visible title, workspace and latest road commit without spawning git', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-cache-'))
+  const root = join(home, '.dsh-history-rewind')
+  await ensureHistoryRoot(root)
+  const repo = join(root, 'repos', 'session-ref-test.git')
+  const heads = join(repo, 'refs', 'heads')
+  await mkdir(heads, { recursive: true })
+  await writeFile(join(repo, 'packed-refs'), `${'1'.repeat(40)} refs/heads/main\n`, 'utf8')
+  await writeFile(join(heads, 'road-100'), `${'2'.repeat(40)}\n`, 'utf8')
+  await writeFile(join(heads, 'road-200'), `${'3'.repeat(40)}\n`, 'utf8')
+  const projections = join(home, 'storages', 'session_projcache', 'sessions')
+  await mkdir(projections, { recursive: true })
+  await writeFile(join(projections, 'ref-test.json'), JSON.stringify({
+    record: {
+      identity: { cwd: 'E:\\workspace-one' },
+      rows: { title: { val: '用户看到的会话名' } },
+    },
+  }), 'utf8')
+
+  const item = (await listStoredSessions(root, false)).find((entry) => entry.sessionId === 'ref-test')
+  assert.equal(item?.commit, '3'.repeat(40))
+  assert.equal(item?.workspace, 'workspace-one')
+  assert.equal(item?.title, '用户看到的会话名')
+  await rm(home, { recursive: true, force: true })
+})
+
 test('clearing specific sessions only removes selected session repositories and backups', async () => {
   const { root, cleanup } = await seeded()
 

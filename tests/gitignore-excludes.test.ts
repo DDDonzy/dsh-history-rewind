@@ -101,6 +101,37 @@ test('a root .gitignore that matches itself is still snapshotted (forced whiteli
   await rm(root, { recursive: true, force: true }).catch(() => undefined)
 })
 
+test('workspace snapshots report complete added modified and deleted paths', async () => {
+  const subprocess = fakeSubprocess()
+  const root = await mkdtemp(join(tmpdir(), 'dsh-gi-'))
+  const cwd = join(root, 'ws')
+  await mkdir(cwd, { recursive: true })
+  await writeFile(join(cwd, '.gitignore'), '.git\n', 'utf8')
+  await writeFile(join(cwd, 'modified.txt'), 'v1', 'utf8')
+  await writeFile(join(cwd, 'deleted.txt'), 'gone', 'utf8')
+
+  const first = await snapshotWorkspace(subprocess, root, 's-changes', cwd, 'first')
+  assert.equal(first.ok, true)
+  assert.deepEqual(first.changes?.map((change) => [change.status, change.path]), [
+    ['A', '.gitignore'],
+    ['A', 'deleted.txt'],
+    ['A', 'modified.txt'],
+  ])
+
+  await writeFile(join(cwd, 'modified.txt'), 'v2', 'utf8')
+  await rm(join(cwd, 'deleted.txt'))
+  await writeFile(join(cwd, 'added.txt'), 'new', 'utf8')
+  const second = await snapshotWorkspace(subprocess, root, 's-changes', cwd, 'second')
+  assert.equal(second.ok, true)
+  assert.deepEqual(second.changes?.map((change) => [change.status, change.path]), [
+    ['A', 'added.txt'],
+    ['D', 'deleted.txt'],
+    ['M', 'modified.txt'],
+  ])
+
+  await rm(root, { recursive: true, force: true }).catch(() => undefined)
+})
+
 test('ensureWorkspaceGitignore never overwrites a pre-existing .gitignore', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-gi-'))
   const cwd = join(root, 'ws')

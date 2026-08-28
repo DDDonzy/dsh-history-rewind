@@ -109,16 +109,15 @@ export function argvWriteTree(repo: ShadowRepo): string[] {
 
 /**
  * argv: create a commit object from a tree, optionally with one parent;
- * stdout is the commit SHA. The message travels as one argv element and is
- * never shell-interpreted.
+ * stdout is the commit SHA. The message is read from stdin (`-F -`) so a
+ * complete workspace file manifest never hits the platform argv-size limit.
  * @param repo - the bare shadow repo.
  * @param treeSha - root tree SHA.
- * @param message - commit message.
  * @param parentSha - optional single parent (anchor).
- * @returns the commit-tree argv.
+ * @returns the commit-tree argv; caller supplies the message as stdin.
  */
-export function argvCommitTree(repo: ShadowRepo, treeSha: string, message: string, parentSha?: string): string[] {
-  const argv = [...base(repo), 'commit-tree', treeSha, '-m', message]
+export function argvCommitTree(repo: ShadowRepo, treeSha: string, parentSha?: string): string[] {
+  const argv = [...base(repo), 'commit-tree', treeSha, '-F', '-']
   if (parentSha !== undefined && parentSha.length > 0) argv.push('-p', parentSha)
   return argv
 }

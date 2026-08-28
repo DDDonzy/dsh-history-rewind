@@ -19,6 +19,7 @@ import { readdir, lstat, cp, unlink, rmdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, sep, basename, relative, resolve } from 'node:path'
 import type { SubprocessLike } from './git-runner.ts'
+import type { WorkspaceChange } from './messages.ts'
 import { runGit, firstLine } from './git-runner.ts'
 import {
   argvHashObjectStdinPaths, argvUpdateIndexFromInfo, argvWriteTree, argvCommitTree,
@@ -178,6 +179,22 @@ export interface WorkspaceSnapshotResult {
   commit?: string
   /** True when the snapshot reused the parent commit (unchanged tree). */
   reused?: boolean
+  /** Complete A/M/D manifest relative to the parent workspace tree. */
+  changes?: WorkspaceChange[]
+}
+
+/** Parse `git diff-tree --name-status -z` output (status/path NUL pairs). */
+function parseWorkspaceChanges(stdout: string): WorkspaceChange[] {
+  const fields = stdout.split('\0')
+  const changes: WorkspaceChange[] = []
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const rawStatus = fields[index]!
+    const path = fields[index + 1]!
+    if (rawStatus.length === 0 || path.length === 0) continue
+    const status = rawStatus === 'A' ? 'A' : rawStatus === 'D' ? 'D' : 'M'
+    changes.push({ status, path })
+  }
+  return changes
 }
 
 /**
@@ -219,7 +236,7 @@ export async function snapshotWorkspace(
     const signature = signatureOf(files, excludes)
     const cached = wsSignatureCache.get(cacheKey)
     if (cached !== undefined && cached.signature === signature && existsSync(join(repoDir, 'HEAD'))) {
-      return { ok: true, commit: cached.commit, reused: true }
+      return { ok: true, commit: cached.commit, reused: true, changes: [] }
     }
 
     // 1. Batch-hash every file (git reads them itself; any order is fine).
@@ -292,16 +309,31 @@ export async function snapshotWorkspace(
     }
     if (parent !== undefined && parentTree === rootTree) {
       wsSignatureCache.set(cacheKey, { signature, rootTree, commit: parent })
-      return { ok: true, commit: parent, reused: true }
+      return { ok: true, commit: parent, reused: true, changes: [] }
     }
-    const committed = await runGit(subprocess, argvCommitTree(repo, rootTree, message, parent), cwd, env)
+
+    let changes: WorkspaceChange[]
+    if (parentTree === undefined) {
+      changes = files.map((file) => ({ status: 'A' as const, path: file.rel }))
+    } else {
+      const diff = await runGit(
+        subprocess,
+        ['git', `--git-dir=${repoDir}`, 'diff-tree', '--no-commit-id', '--name-status', '--no-renames', '-r', '-z', parentTree, rootTree],
+        cwd,
+        env,
+      )
+      if (diff.exitCode !== 0) return { ok: false, reason: 'diff-failed', detail: diff.stderr }
+      changes = parseWorkspaceChanges(diff.stdout)
+    }
+
+    const committed = await runGit(subprocess, argvCommitTree(repo, rootTree, parent), cwd, env, message)
     if (committed.exitCode !== 0) return { ok: false, reason: 'commit-failed' }
     const commit = firstLine(committed.stdout)
     if (commit.length === 0) return { ok: false, reason: 'commit-empty' }
     const updated = await runGit(subprocess, argvUpdateRef(repo, 'refs/heads/main', commit), cwd, env)
     if (updated.exitCode !== 0) return { ok: false, reason: 'update-ref-failed' }
     wsSignatureCache.set(cacheKey, { signature, rootTree, commit })
-    return { ok: true, commit, reused: false }
+    return { ok: true, commit, reused: false, changes }
   } finally {
     await lock.release()
   }
