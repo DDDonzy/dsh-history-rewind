@@ -77,10 +77,26 @@ export interface HistoryRewindConfig {
    * edited by hand afterwards — is never touched or merged with this value.
    */
   gitignoreTemplate: string
+  /**
+   * Soft budget for the shadow store, in GB. Advisory ONLY: reaching it never
+   * deletes anything and never blocks a snapshot — the UI just escalates its
+   * warning. Automatic eviction is deliberately out of scope, because the only
+   * thing there is to evict is rewind history the user may still need.
+   */
+  cacheCapacityGb: number
 }
 
 /** Schema defaults. */
 export const HISTORY_REWIND_DEFAULTS: HistoryRewindConfig = {
   enabled: true,
   gitignoreTemplate: `${DEFAULT_GITIGNORE_TEMPLATE.join('\n')}\n`,
+  cacheCapacityGb: 100,
 }
+
+/** Usage ratio at which the capacity bar turns amber (healthy below this). */
+export const CACHE_WARN_RATIO = 0.75
+/** Usage ratio at which the capacity bar turns red. */
+export const CACHE_FULL_RATIO = 0.9
+
+/** What a cache-clear request targets. */
+export type CacheScope = 'session' | 'workspace' | 'both'

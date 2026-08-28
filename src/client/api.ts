@@ -248,10 +248,12 @@ export async function installGit(): Promise<InstallGitResult> {
   }
 }
 
-/** Global plugin config (settings page): currently just the .gitignore seed. */
+/** Global plugin config (settings page). */
 export interface ConfigResult {
   ok: boolean
   gitignoreTemplate?: string
+  /** Advisory shadow-store budget in GB (never enforced automatically). */
+  cacheCapacityGb?: number
 }
 
 /** Read the current global config. */
@@ -261,6 +263,7 @@ export async function getConfig(): Promise<ConfigResult> {
   return {
     ok: data.ok === true,
     ...(typeof data.gitignoreTemplate === 'string' ? { gitignoreTemplate: data.gitignoreTemplate } : {}),
+    ...(typeof data.cacheCapacityGb === 'number' ? { cacheCapacityGb: data.cacheCapacityGb } : {}),
   }
 }
 
@@ -275,6 +278,59 @@ export async function setConfig(gitignoreTemplate: string): Promise<{ ok: boolea
   if (data === null) return { ok: false, reason: 'transport' }
   return {
     ok: data.ok === true,
+    ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
+  }
+}
+
+/** Save the advisory cache capacity, in GB. */
+export async function setCacheCapacity(cacheCapacityGb: number): Promise<{ ok: boolean; reason?: string }> {
+  const data = await post(`${ROUTE_PREFIX}/config`, { cacheCapacityGb })
+  if (data === null) return { ok: false, reason: 'transport' }
+  return {
+    ok: data.ok === true,
+    ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
+  }
+}
+
+/** Shadow-store usage against the advisory capacity. */
+export interface CacheUsageResult {
+  ok: boolean
+  sessionBytes: number
+  workspaceBytes: number
+  backupsBytes: number
+  totalBytes: number
+  capacityBytes: number
+}
+
+/** Read current shadow-store usage. */
+export async function getCacheUsage(): Promise<CacheUsageResult | null> {
+  const data = await get(`${ROUTE_PREFIX}/cache`)
+  if (data === null || data.ok !== true) return null
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  return {
+    ok: true,
+    sessionBytes: num(data.sessionBytes),
+    workspaceBytes: num(data.workspaceBytes),
+    backupsBytes: num(data.backupsBytes),
+    totalBytes: num(data.totalBytes),
+    capacityBytes: num(data.capacityBytes),
+  }
+}
+
+/** What a clear request targets. */
+export type CacheScope = 'session' | 'workspace' | 'both'
+
+/**
+ * Clear the shadow store for one or both areas. IRREVERSIBLE: this drops the
+ * rewind history itself, not just cached derivatives.
+ */
+export async function clearCache(scope: CacheScope): Promise<{ ok: boolean; freedBytes?: number; failed?: number; reason?: string }> {
+  const data = await post(`${ROUTE_PREFIX}/cache/clear`, { scope })
+  if (data === null) return { ok: false, reason: 'transport' }
+  return {
+    ok: data.ok === true,
+    ...(typeof data.freedBytes === 'number' ? { freedBytes: data.freedBytes } : {}),
+    ...(typeof data.failed === 'number' ? { failed: data.failed } : {}),
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
   }
 }

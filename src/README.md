@@ -118,7 +118,12 @@ $DSH_HOME/.dsh-history-rewind/
 └── backups/                      # 回退前备份（会话物理文件 + 工作区状态）
                                   #   回退成功即清理本次副本；仅失败/半成功
                                   #   的那几次会残留下来供手动恢复
+                                  #   session-*    = 会话副本
+                                  #   ws-session-* = 工作区副本（清理时按此分流）
 ```
+
+> `config.json` 存全局设置：`gitignoreTemplate`（新工作区 `.gitignore` 种子）与
+> `cacheCapacityGb`（缓存容量建议值，默认 100）。详见「缓存容量与清理」。
 
 - 会话仓库按 id 命名（1:1），首次快照 init；
 - 工作区快照走 plumbing 遍历（`hash-object`/`mktree`），跳过一切 `.git` 与排除规则——cwd 本身是 git 仓库时不会退化成单个 gitlink；
@@ -239,6 +244,19 @@ version，actor 携带新 agent），让跳转后的首次编辑直接通过。�
 - 轨道坐标来自**真实 DOM 测量**（`useLayoutEffect` 读每行 `offsetTop`/`offsetHeight`），所以锚点精确落在每张卡片垂直中心，自动适配不同卡片行数、内容换行与页面缩放；
 - 时间线窗口化：默认 HEAD ±20 条；滚动到两端自动加载历史/后续版本（窗口切片 + 滚动锚定，数据全量在内存）；
 - **每次渲染开销与会话长度无关**：拓扑索引（`sha → lane`、`sha → children`）用 `useMemo` 绑定 graph 只建一次，渲染时只遍历窗口内的行并经索引反查邻边；hover 重绘不触发 DOM 测量。实测每次渲染 ~0.0015ms（1000 / 10000 / 50000 条提交均相同），索引构建 5 万条约 14ms 且仅一次。
+
+---
+
+## 缓存容量与清理
+
+设置页（设置 → HISTORY-REWIND）的「快照缓存」块由两条通道支撑：
+
+- `GET /cache` → `cacheUsage(root)`：分别统计 `repos/`、`repos-ws/`、`backups/` 的字节数并回报配置容量。遍历对**中途消失的条目宽容**（并发快照的临时文件、`gc` 重打包），缺失目录记 0——这是给用量读数供数，近似但不崩比精确但抛异常更合适；
+- `POST /cache/clear` → `clearCache(root, scope)`：`scope ∈ session | workspace | both`。
+
+**容量是纯建议值**：`cacheCapacityGb`（默认 100）只驱动进度条配色（绿 → 橙 `CACHE_WARN_RATIO 0.75` → 红 `CACHE_FULL_RATIO 0.9`）。**超限不会删任何东西，也不会拦住快照**。不做自动淘汰是刻意的：这里可淘汰的对象就是回退历史本身，淘汰即意味着用户再也跳不回去，该决定必须留给用户。该字段读取时做硬校验（非有限数 / ≤0 一律回落默认值），因为它由用户手输，NaN 会让整条进度条失去意义。
+
+**清理的作用域语义**：清 `session` 删 `repos/` 的内容，清 `workspace` 删 `repos-ws/` 的内容；`backups/` 按命名约定分流——工作区副本在 `ws-session-*`，会话副本在 `session-*`，所以只清一侧不会波及另一侧的备份。**区域目录本身始终保留**（只删子项），否则后续以该目录为 cwd 的 git 调用会 ENOENT。清理不可恢复，且不做选择性保留：这是"腾磁盘"动作，不去猜哪些提交还有用。
 
 ---
 

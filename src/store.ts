@@ -4,14 +4,15 @@
  * by every snapshot/restore of a shared workspace repo.
  */
 
-import { open, mkdir, stat, unlink, readFile, writeFile } from 'node:fs/promises'
+import { open, mkdir, stat, unlink, readFile, writeFile, readdir, rm, lstat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   HISTORY_ROOT_DIRNAME, REPOS_DIRNAME, REPOS_WS_DIRNAME,
   BACKUPS_DIRNAME, LOCKS_DIRNAME, LOCK_STALE_MS,
-  CONFIG_FILENAME, HISTORY_REWIND_DEFAULTS, type HistoryRewindConfig,
+  CONFIG_FILENAME, HISTORY_REWIND_DEFAULTS,
+  type HistoryRewindConfig, type CacheScope,
 } from './constants.ts'
 import type { SubprocessLike } from './git-runner.ts'
 import { runGit, firstLine } from './git-runner.ts'
@@ -254,6 +255,13 @@ export async function readConfig(root: string): Promise<HistoryRewindConfig> {
       gitignoreTemplate: typeof parsed.gitignoreTemplate === 'string'
         ? parsed.gitignoreTemplate
         : HISTORY_REWIND_DEFAULTS.gitignoreTemplate,
+      // Guard the numeric field hard: a NaN/negative/absurd capacity would make
+      // the usage bar meaningless, and this value is user-typed.
+      cacheCapacityGb: typeof parsed.cacheCapacityGb === 'number'
+        && Number.isFinite(parsed.cacheCapacityGb)
+        && parsed.cacheCapacityGb > 0
+        ? parsed.cacheCapacityGb
+        : HISTORY_REWIND_DEFAULTS.cacheCapacityGb,
     }
   } catch {
     return HISTORY_REWIND_DEFAULTS
@@ -273,4 +281,142 @@ export async function writeConfig(root: string, patch: Partial<HistoryRewindConf
   await mkdir(root, { recursive: true })
   await writeFile(configPath(root), JSON.stringify(next, null, 2), 'utf-8')
   return next
+}
+
+/**
+ * Total bytes under one directory, following no symlinks and tolerating races.
+ *
+ * Entries that vanish mid-walk (a concurrent snapshot's temp file, a `gc` run
+ * repacking objects) are skipped rather than thrown: this powers a usage
+ * readout, so an approximate-but-alive number beats an exact-or-crash one.
+ * @param dir - directory to measure; a missing directory measures 0.
+ * @returns total size in bytes (0 when the directory does not exist).
+ */
+async function dirSize(dir: string): Promise<number> {
+  let total = 0
+  const walk = async (current: string): Promise<void> => {
+    const entries = await readdir(current, { withFileTypes: true }).catch(() => null)
+    if (entries === null) return // absent or unreadable: contributes 0
+    for (const entry of entries) {
+      const child = join(current, entry.name)
+      try {
+        if (entry.isDirectory()) await walk(child)
+        else if (entry.isFile()) total += (await lstat(child)).size
+      } catch {
+        // Vanished between readdir and stat: skip it.
+      }
+    }
+  }
+  await walk(dir)
+  return total
+}
+
+/** Shadow-store usage broken down by area, against the advisory capacity. */
+export interface CacheUsage {
+  /** Bytes under repos/ (conversation history). */
+  sessionBytes: number
+  /** Bytes under repos-ws/ (workspace snapshots). */
+  workspaceBytes: number
+  /** Bytes under backups/ (retained pre-rewind copies). */
+  backupsBytes: number
+  /** sessionBytes + workspaceBytes + backupsBytes. */
+  totalBytes: number
+  /** The configured advisory budget, in bytes. */
+  capacityBytes: number
+}
+
+/**
+ * Measure the shadow store against the configured advisory capacity.
+ * @param root - history root.
+ * @returns per-area byte totals plus the capacity they are judged against.
+ */
+export async function cacheUsage(root: string): Promise<CacheUsage> {
+  const config = await readConfig(root)
+  const [sessionBytes, workspaceBytes, backupsBytes] = await Promise.all([
+    dirSize(join(root, REPOS_DIRNAME)),
+    dirSize(join(root, REPOS_WS_DIRNAME)),
+    dirSize(join(root, BACKUPS_DIRNAME)),
+  ])
+  return {
+    sessionBytes,
+    workspaceBytes,
+    backupsBytes,
+    totalBytes: sessionBytes + workspaceBytes + backupsBytes,
+    capacityBytes: Math.round(config.cacheCapacityGb * 1024 ** 3),
+  }
+}
+
+/** Outcome of one cache-clear request. */
+export interface ClearCacheResult {
+  ok: boolean
+  /** Bytes released (measured before deletion). */
+  freedBytes: number
+  /** Top-level entries removed. */
+  removed: number
+  /** Entries that could not be removed (in use, permissions). */
+  failed: number
+}
+
+/**
+ * Delete the CONTENTS of one or both shadow-repo areas, plus the matching
+ * pre-rewind backups.
+ *
+ * Irreversible by design and intentionally not selective: this is the "reclaim
+ * the disk" action, so it drops whole histories rather than trying to guess
+ * which commits are still wanted. The area directories themselves are kept so
+ * later git calls that use them as cwd cannot hit ENOENT.
+ *
+ * Backups are scoped by their naming convention: workspace copies live in
+ * `ws-session-*`, session copies in `session-*`. Clearing only the session area
+ * therefore leaves workspace backups alone, and vice versa.
+ * @param root - history root.
+ * @param scope - which area(s) to clear.
+ * @returns bytes freed and per-entry success counts.
+ */
+export async function clearCache(root: string, scope: CacheScope): Promise<ClearCacheResult> {
+  const wantSession = scope === 'session' || scope === 'both'
+  const wantWorkspace = scope === 'workspace' || scope === 'both'
+
+  // Repo areas are measured up front (whole-area deletion); backups are summed
+  // per entry inside the walk, since only the matching ones get dropped.
+  const before = await cacheUsage(root)
+  const repoFreed = (wantSession ? before.sessionBytes : 0)
+    + (wantWorkspace ? before.workspaceBytes : 0)
+
+  let removed = 0
+  let failed = 0
+  let backupsFreed = 0
+
+  /** Remove every child of `dir`, keeping `dir` itself. */
+  const clearChildren = async (dir: string, keep?: (name: string) => boolean): Promise<void> => {
+    let entries: string[]
+    try {
+      entries = await readdir(dir)
+    } catch {
+      return // absent area: nothing to clear
+    }
+    for (const name of entries) {
+      if (keep !== undefined && keep(name)) continue
+      const target = join(dir, name)
+      try {
+        if (dir.endsWith(BACKUPS_DIRNAME)) backupsFreed += await dirSize(target)
+        await rm(target, { recursive: true, force: true })
+        removed += 1
+      } catch {
+        failed += 1
+      }
+    }
+  }
+
+  if (wantSession) await clearChildren(join(root, REPOS_DIRNAME))
+  if (wantWorkspace) await clearChildren(join(root, REPOS_WS_DIRNAME))
+  // Backups: keep the ones belonging to the area that was NOT cleared.
+  await clearChildren(
+    join(root, BACKUPS_DIRNAME),
+    scope === 'both'
+      ? undefined
+      : (name) => (scope === 'workspace' ? !name.startsWith('ws-session-') : name.startsWith('ws-session-')),
+  )
+
+  return { ok: failed === 0, freedBytes: repoFreed + backupsFreed, removed, failed }
 }

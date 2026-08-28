@@ -10,8 +10,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit, getConfig, setConfig, type TimelineRow } from './api.ts'
-import { ROUTE_PREFIX, SETTINGS_NAMESPACE } from '../constants.ts'
+import {
+  fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit,
+  getConfig, setConfig, setCacheCapacity, getCacheUsage, clearCache,
+  type TimelineRow, type CacheScope, type CacheUsageResult,
+} from './api.ts'
+import { ROUTE_PREFIX, SETTINGS_NAMESPACE, CACHE_WARN_RATIO, CACHE_FULL_RATIO } from '../constants.ts'
 import { buildGraph, roadSet, type GraphRow } from './layout.ts'
 import {
   injectStyles,
@@ -1441,6 +1445,290 @@ function GitignoreTemplateCard(): ReactNode {
   )
 }
 
+/** Human-readable byte size (binary units, 1 decimal from MB up). */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value < 10 && unit >= 1 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
+}
+
+/**
+ * Cache capacity + usage card (设置/HISTORY-REWIND).
+ *
+ * The capacity is ADVISORY: crossing it never deletes anything and never
+ * blocks a snapshot — the bar just escalates green → amber → red. Automatic
+ * eviction is deliberately absent, because the only thing available to evict
+ * is rewind history the user may still want; the decision stays theirs.
+ */
+function CacheCard(): ReactNode {
+  const [usage, setUsage] = useState<CacheUsageResult | null>(null)
+  const [capacityText, setCapacityText] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [clearing, setClearing] = useState(false)
+
+  const load = async (): Promise<void> => {
+    const [config, measured] = await Promise.all([getConfig(), getCacheUsage()])
+    if (config.ok && typeof config.cacheCapacityGb === 'number') {
+      setCapacityText(String(config.cacheCapacityGb))
+    }
+    setUsage(measured)
+    setLoaded(true)
+  }
+  useEffect(() => { void load() }, [])
+
+  const doSaveCapacity = async (): Promise<void> => {
+    const gb = Number(capacityText)
+    if (!Number.isFinite(gb) || gb <= 0) {
+      setNotice('请输入大于 0 的数字')
+      return
+    }
+    setSaving(true)
+    setNotice('')
+    const result = await setCacheCapacity(gb)
+    setSaving(false)
+    if (!result.ok) {
+      setNotice(`保存失败：${result.reason ?? 'unknown'}`)
+      return
+    }
+    setNotice('已保存 ✓')
+    await load()
+  }
+
+  const doClear = async (scope: CacheScope): Promise<void> => {
+    setClearing(true)
+    setNotice('')
+    const result = await clearCache(scope)
+    setClearing(false)
+    setDialogOpen(false)
+    setNotice(result.ok
+      ? `已清空 ✓ 释放 ${formatBytes(result.freedBytes ?? 0)}`
+      : `清空未完成：${result.failed ?? 0} 项无法删除${result.reason !== undefined ? `（${result.reason}）` : ''}`)
+    await load()
+  }
+
+  const total = usage?.totalBytes ?? 0
+  const capacity = usage?.capacityBytes ?? 0
+  const ratio = capacity > 0 ? total / capacity : 0
+  const pct = Math.min(100, ratio * 100)
+  const barColor = ratio >= CACHE_FULL_RATIO
+    ? '#e5534b'
+    : ratio >= CACHE_WARN_RATIO ? '#d29922' : '#3fb950'
+  const health = ratio >= CACHE_FULL_RATIO
+    ? '已接近或超出容量，建议清理（插件不会自动删除任何历史）'
+    : ratio >= CACHE_WARN_RATIO ? '占用偏高，可考虑清理' : '容量健康'
+
+  const labelStyle = { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)' }
+
+  return createElement('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: 8, width: '100%', flex: 'none' },
+  },
+    createElement('div', {
+      style: {
+        height: 1,
+        width: '100%',
+        background: 'var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.08))',
+        margin: '6px 0 8px',
+        flex: 'none',
+      },
+    }),
+    createElement('span', { style: { fontWeight: 600, fontSize: 13 } }, '快照缓存'),
+
+    // Row 1: capacity setting, value right-aligned.
+    createElement('div', {
+      style: { display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' },
+    },
+      createElement('span', { style: labelStyle }, '缓存容量上限'),
+      createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+        createElement('input', {
+          type: 'number',
+          min: 1,
+          step: 1,
+          value: capacityText,
+          disabled: !loaded,
+          onChange: (event: { target: { value: string } }) => setCapacityText(event.target.value),
+          style: {
+            width: 88,
+            textAlign: 'right',
+            padding: '5px 8px',
+            borderRadius: 6,
+            border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+            background: 'var(--dsw-alias-markdown-code-block, #1c1c1e)',
+            color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+            fontSize: 12,
+            fontFamily: 'var(--ds-font-family-code, monospace)',
+          },
+        }),
+        createElement('span', { style: labelStyle }, 'GB'),
+        createElement('button', {
+          type: 'button',
+          disabled: saving || !loaded,
+          onClick: () => void doSaveCapacity(),
+          style: {
+            padding: '5px 14px',
+            borderRadius: 6,
+            border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+            background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
+            color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+            fontSize: 12,
+            cursor: saving ? 'default' : 'pointer',
+          },
+        }, saving ? '保存中…' : '保存'),
+      ),
+    ),
+
+    // Row 2: usage bar + clear action.
+    createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
+      createElement('div', {
+        style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
+      },
+        createElement('div', {
+          style: {
+            height: 8,
+            width: '100%',
+            borderRadius: 999,
+            background: 'var(--dsw-alias-border-l1, rgba(255,255,255,0.10))',
+            overflow: 'hidden',
+          },
+        },
+          createElement('div', {
+            style: {
+              height: '100%',
+              width: `${pct}%`,
+              background: barColor,
+              borderRadius: 999,
+              transition: 'width 0.3s ease, background 0.3s ease',
+            },
+          }),
+        ),
+        createElement('div', { style: { ...labelStyle, display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          createElement('span', null, usage === null
+            ? '统计中…'
+            : `${formatBytes(total)} / ${formatBytes(capacity)}（${pct.toFixed(1)}%）`),
+          createElement('span', { style: { color: barColor } }, health),
+        ),
+        usage !== null
+          ? createElement('div', { style: { ...labelStyle, fontSize: 11 } },
+              `会话 ${formatBytes(usage.sessionBytes)} · 工作区 ${formatBytes(usage.workspaceBytes)} · 备份 ${formatBytes(usage.backupsBytes)}`)
+          : null,
+      ),
+      createElement('button', {
+        type: 'button',
+        disabled: !loaded || clearing,
+        onClick: () => setDialogOpen(true),
+        style: {
+          flex: 'none',
+          padding: '5px 14px',
+          borderRadius: 6,
+          border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+          background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
+          color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+          fontSize: 12,
+          cursor: clearing ? 'default' : 'pointer',
+        },
+      }, clearing ? '清空中…' : 'Clear'),
+    ),
+
+    notice.length > 0
+      ? createElement('span', { style: labelStyle }, notice)
+      : null,
+
+    // Scope picker. Deliberately spells out that this erases history and is
+    // not undoable — unlike a rewind, there is nothing left to jump back to.
+    dialogOpen
+      ? createElement('div', {
+          style: {
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10001,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          },
+          onClick: () => { if (!clearing) setDialogOpen(false) },
+        },
+          createElement('div', {
+            onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+            style: {
+              width: 'min(460px, 92vw)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 14,
+              padding: 20,
+              borderRadius: 14,
+              border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+              background: 'var(--dsw-specific-sidebar-fill, #202021)',
+              boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+            },
+          },
+            createElement('div', {
+              style: { fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary, #e6e6e6)' },
+            }, '清空快照缓存'),
+            createElement('div', { style: { ...labelStyle, lineHeight: 1.6 } },
+              '选择要清空的范围。此操作会删除对应的影子仓库历史，',
+              createElement('strong', { style: { color: '#e5534b' } }, '不可恢复'),
+              '，清空后这些版本无法再回退。你的项目代码本身不受影响。'),
+            createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+              ...([
+                ['session', '仅会话', '删除对话历史快照（repos/）'],
+                ['workspace', '仅工作区', '删除代码快照（repos-ws/）'],
+                ['both', '会话和工作区', '两者全部删除'],
+              ] as [CacheScope, string, string][]).map(([scope, title, desc]) =>
+                createElement('button', {
+                  key: scope,
+                  type: 'button',
+                  disabled: clearing,
+                  onClick: () => void doClear(scope),
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
+                    gap: 2,
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                    background: 'transparent',
+                    color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                    cursor: clearing ? 'default' : 'pointer',
+                    textAlign: 'left',
+                  },
+                },
+                  createElement('span', { style: { fontSize: 12, fontWeight: 500 } }, title),
+                  createElement('span', { style: { ...labelStyle, fontSize: 11 } }, desc),
+                ),
+              ),
+            ),
+            createElement('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
+              createElement('button', {
+                type: 'button',
+                disabled: clearing,
+                onClick: () => setDialogOpen(false),
+                style: {
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                  background: 'transparent',
+                  color: 'var(--dsw-alias-label-secondary, #999)',
+                  fontSize: 12,
+                  cursor: clearing ? 'default' : 'pointer',
+                },
+              }, '取消'),
+            ),
+          ),
+        )
+      : null,
+  )
+}
+
 /** Full settings page (设置 → Rewind): wraps the git status/install
  *  card in a page layout. The shell supplies { close, useSessions,
  *  useWorkspaces }; this card only needs the git check, so extra props are
@@ -1457,6 +1745,9 @@ function HistoryRewindSettingsPage(): ReactNode {
       minHeight: 0,
       padding: '4px 0',
       flex: 1,
+      // The gitignore textarea grows to fill, and the cache card sits below it;
+      // on a short viewport the page scrolls rather than clipping the card.
+      overflowY: 'auto',
     },
   },
     createElement('div', {
@@ -1478,6 +1769,7 @@ function HistoryRewindSettingsPage(): ReactNode {
     }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。'),
     createElement(GitPluginCard),
     createElement(GitignoreTemplateCard),
+    createElement(CacheCard),
   )
 }
 

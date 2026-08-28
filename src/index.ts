@@ -23,8 +23,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdirSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import { ROUTE_PREFIX } from './constants.ts'
-import { historyRoot, sessionRepoDir, ensureHistoryRoot, readConfig, writeConfig } from './store.ts'
+import { ROUTE_PREFIX, type HistoryRewindConfig } from './constants.ts'
+import { historyRoot, sessionRepoDir, ensureHistoryRoot, readConfig, writeConfig, cacheUsage, clearCache } from './store.ts'
 import type { SubprocessLike } from './git-runner.ts'
 import { runGit, firstLine } from './git-runner.ts'
 import { argvRevParseCommit } from './git-commands.ts'
@@ -202,6 +202,13 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
+      // GET /cache — shadow-store usage vs the advisory capacity. Global, like
+      // /config: it measures the whole store, not one session.
+      if (pathname === `${ROUTE_PREFIX}/cache` && method === 'GET') {
+        json(res, 200, { ok: true, ...(await cacheUsage(engine.root)) })
+        return
+      }
+
       if (method !== 'POST') {
         json(res, 404, { ok: false, reason: 'not-found' })
         return
@@ -225,12 +232,48 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
           return
         }
         const configArgs = (configBody !== null && typeof configBody === 'object' ? configBody : {}) as Record<string, unknown>
-        if (typeof configArgs.gitignoreTemplate !== 'string') {
+        // Both fields are optional so the two settings cards can save
+        // independently, but at least one must be present and well-formed.
+        const patch: Partial<HistoryRewindConfig> = {}
+        if (typeof configArgs.gitignoreTemplate === 'string') {
+          patch.gitignoreTemplate = configArgs.gitignoreTemplate
+        }
+        if (configArgs.cacheCapacityGb !== undefined) {
+          const gb = Number(configArgs.cacheCapacityGb)
+          if (!Number.isFinite(gb) || gb <= 0) {
+            json(res, 400, { ok: false, reason: 'bad-capacity' })
+            return
+          }
+          patch.cacheCapacityGb = gb
+        }
+        if (Object.keys(patch).length === 0) {
           json(res, 400, { ok: false, reason: 'bad-args' })
           return
         }
-        const updated = await writeConfig(engine.root, { gitignoreTemplate: configArgs.gitignoreTemplate })
+        const updated = await writeConfig(engine.root, patch)
         json(res, 200, { ok: true, ...updated })
+        return
+      }
+
+      // POST /cache/clear — { scope: 'session' | 'workspace' | 'both' }.
+      // IRREVERSIBLE: drops whole shadow histories for the chosen area(s).
+      // Global like /config, so it precedes the sessionId-required branches.
+      if (pathname === `${ROUTE_PREFIX}/cache/clear`) {
+        let clearBody: unknown
+        try {
+          clearBody = await readJson(req)
+        } catch {
+          json(res, 400, { ok: false, reason: 'bad-json' })
+          return
+        }
+        const clearArgs = (clearBody !== null && typeof clearBody === 'object' ? clearBody : {}) as Record<string, unknown>
+        const scope = clearArgs.scope
+        if (scope !== 'session' && scope !== 'workspace' && scope !== 'both') {
+          json(res, 400, { ok: false, reason: 'bad-scope' })
+          return
+        }
+        const cleared = await clearCache(engine.root, scope)
+        json(res, 200, { ...cleared, usage: await cacheUsage(engine.root) })
         return
       }
 
