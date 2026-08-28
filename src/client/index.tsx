@@ -12,8 +12,8 @@ import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
   fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit,
-  getConfig, setConfig, setCacheCapacity, getCacheUsage, clearCache,
-  type TimelineRow, type CacheScope, type CacheUsageResult,
+  getConfig, setConfig, setCacheCapacity, getCacheUsage, clearCache, getCacheSessions,
+  type TimelineRow, type CacheScope, type CacheUsageResult, type StoredSession,
 } from './api.ts'
 import { ROUTE_PREFIX, SETTINGS_NAMESPACE, CACHE_WARN_RATIO, CACHE_FULL_RATIO } from '../constants.ts'
 import { buildGraph, roadSet, type GraphRow } from './layout.ts'
@@ -1364,7 +1364,8 @@ function GitignoreTemplateCard(): ReactNode {
       flexDirection: 'column',
       gap: 8,
       width: '100%',
-      flex: 'none',
+      flex: 1,
+      minHeight: 0,
     },
   },
     createElement('div', {
@@ -1396,16 +1397,16 @@ function GitignoreTemplateCard(): ReactNode {
       disabled: !loaded,
       onChange: (event: { target: { value: string } }) => setText(event.target.value),
       placeholder: 'node_modules/\ndist/\n*.log',
-      rows: 5,
       style: {
         width: '100%',
-        height: 110,
+        flex: 1,
+        minHeight: 120,
         boxSizing: 'border-box',
-        resize: 'vertical',
+        resize: 'none',
         fontFamily: 'var(--ds-font-family-code, monospace)',
         fontSize: 12,
         lineHeight: 1.5,
-        padding: '8px 12px',
+        padding: '10px 12px',
         borderRadius: 8,
         border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
         background: 'var(--dsw-alias-markdown-code-block, #1c1c1e)',
@@ -1467,10 +1468,13 @@ function formatBytes(bytes: number): string {
  */
 function CacheCard(): ReactNode {
   const [usage, setUsage] = useState<CacheUsageResult | null>(null)
-  const [capacityText, setCapacityText] = useState('')
+  const [capacityText, setCapacityText] = useState('100')
   const [loaded, setLoaded] = useState(false)
   const [notice, setNotice] = useState('')
-  const [dialogOpen, setDialogOpen] = useState(false)
+  const [dialogStep, setDialogStep] = useState<'closed' | 'sessions' | 'scope'>('closed')
+  const [sessionsList, setSessionsList] = useState<StoredSession[]>([])
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set())
+  const [loadingSessions, setLoadingSessions] = useState(false)
   const [clearing, setClearing] = useState(false)
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -1498,12 +1502,27 @@ function CacheCard(): ReactNode {
     }
   }
 
+  const openClearFlow = async (): Promise<void> => {
+    setLoadingSessions(true)
+    setDialogStep('sessions')
+    const r = await getCacheSessions()
+    setLoadingSessions(false)
+    if (r.ok && r.sessions !== undefined) {
+      setSessionsList(r.sessions)
+      setSelectedSessionIds(new Set(r.sessions.map((s) => s.sessionId)))
+    } else {
+      setSessionsList([])
+      setSelectedSessionIds(new Set())
+    }
+  }
+
   const doClear = async (scope: CacheScope): Promise<void> => {
     setClearing(true)
     setNotice('')
-    const result = await clearCache(scope)
+    const targetIds = selectedSessionIds.size === sessionsList.length ? undefined : Array.from(selectedSessionIds)
+    const result = await clearCache(scope, targetIds)
     setClearing(false)
-    setDialogOpen(false)
+    setDialogStep('closed')
     setNotice(result.ok
       ? `已清理 ✓ 释放 ${formatBytes(result.freedBytes ?? 0)}`
       : `清理未完成：${result.failed ?? 0} 项无法删除${result.reason !== undefined ? `（${result.reason}）` : ''}`)
@@ -1523,6 +1542,10 @@ function CacheCard(): ReactNode {
 
   const labelStyle = { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #999)' }
 
+  const selectedBytes = sessionsList
+    .filter((s) => selectedSessionIds.has(s.sessionId))
+    .reduce((acc, s) => acc + s.totalBytes, 0)
+
   return createElement('div', {
     style: { display: 'flex', flexDirection: 'column', gap: 8, width: '100%', flex: 'none' },
   },
@@ -1537,7 +1560,7 @@ function CacheCard(): ReactNode {
     }),
     createElement('span', { style: { fontWeight: 600, fontSize: 13 } }, '快照缓存'),
 
-    // Row 1: capacity setting, numeric text input only, right-aligned, auto-saved.
+    // Row 1: capacity setting, numeric text input only, right-aligned, normal clear text color.
     createElement('div', {
       style: { display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' },
     },
@@ -1556,9 +1579,10 @@ function CacheCard(): ReactNode {
             textAlign: 'right',
             padding: '5px 8px',
             borderRadius: 6,
-            border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+            border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.22))',
             background: 'var(--dsw-alias-markdown-code-block, #1c1c1e)',
-            color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+            color: 'var(--dsw-alias-label-primary, #f5f5f7)',
+            fontWeight: 500,
             fontSize: 12,
             fontFamily: 'var(--ds-font-family-code, monospace)',
           },
@@ -1612,7 +1636,7 @@ function CacheCard(): ReactNode {
       createElement('button', {
         type: 'button',
         disabled: !loaded || clearing,
-        onClick: () => setDialogOpen(true),
+        onClick: () => void openClearFlow(),
         style: {
           padding: '5px 16px',
           borderRadius: 6,
@@ -1626,9 +1650,8 @@ function CacheCard(): ReactNode {
       }, clearing ? '清理中…' : '清理缓存'),
     ),
 
-    // Scope picker. Deliberately spells out that this erases history and is
-    // not undoable — unlike a rewind, there is nothing left to jump back to.
-    dialogOpen
+    // Dialog flow: Step 1 = select sessions; Step 2 = select scope
+    dialogStep !== 'closed'
       ? createElement('div', {
           style: {
             position: 'fixed',
@@ -1639,76 +1662,293 @@ function CacheCard(): ReactNode {
             alignItems: 'center',
             justifyContent: 'center',
           },
-          onClick: () => { if (!clearing) setDialogOpen(false) },
+          onClick: () => { if (!clearing) setDialogStep('closed') },
         },
-          createElement('div', {
-            onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
-            style: {
-              width: 'min(460px, 92vw)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 14,
-              padding: 20,
-              borderRadius: 14,
-              border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-              background: 'var(--dsw-specific-sidebar-fill, #202021)',
-              boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
-            },
-          },
-            createElement('div', {
-              style: { fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary, #e6e6e6)' },
-            }, '清理快照缓存'),
-            createElement('div', { style: { ...labelStyle, lineHeight: 1.6 } },
-              '选择要清理的范围。此操作会删除对应的影子仓库历史，',
-              createElement('strong', { style: { color: '#e5534b' } }, '不可恢复'),
-              '，清理后这些版本无法再回退。你的项目代码本身不受影响。'),
-            createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-              ...([
-                ['session', '仅会话', '删除对话历史快照（repos/）'],
-                ['workspace', '仅工作区', '删除代码快照（repos-ws/）'],
-                ['both', '会话和工作区', '两者全部删除'],
-              ] as [CacheScope, string, string][]).map(([scope, title, desc]) =>
-                createElement('button', {
-                  key: scope,
-                  type: 'button',
-                  disabled: clearing,
-                  onClick: () => void doClear(scope),
+          dialogStep === 'sessions'
+            ? createElement('div', {
+                onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+                style: {
+                  width: 'min(480px, 94vw)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 12,
+                  padding: 20,
+                  borderRadius: 14,
+                  border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                  background: 'var(--dsw-specific-sidebar-fill, #202021)',
+                  boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+                },
+              },
+                createElement('div', {
+                  style: { fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary, #e6e6e6)' },
+                }, '选择要清理的会话'),
+                createElement('div', { style: { ...labelStyle, lineHeight: 1.5 } },
+                  '请勾选需要清理快照历史的会话记录。'),
+
+                // Selection toolbar: Select All checkbox + stats
+                createElement('div', {
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '6px 10px',
+                    background: 'rgba(255,255,255,0.04)',
+                    borderRadius: 8,
+                    border: '1px solid var(--dsw-alias-border-l1, rgba(255,255,255,0.06))',
+                  },
+                },
+                  createElement('label', {
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                      userSelect: 'none',
+                    },
+                  },
+                    createElement('input', {
+                      type: 'checkbox',
+                      checked: sessionsList.length > 0 && selectedSessionIds.size === sessionsList.length,
+                      onChange: (e: { target: { checked: boolean } }) => {
+                        if (e.target.checked) setSelectedSessionIds(new Set(sessionsList.map((s) => s.sessionId)))
+                        else setSelectedSessionIds(new Set())
+                      },
+                    }),
+                    '全选',
+                  ),
+                  createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary, #999)' } },
+                    `已选 ${selectedSessionIds.size} / ${sessionsList.length} 个（共 ${formatBytes(selectedBytes)}）`),
+                ),
+
+                // Session list container (scrollable)
+                createElement('div', {
                   style: {
                     display: 'flex',
                     flexDirection: 'column',
-                    alignItems: 'flex-start',
-                    gap: 2,
-                    padding: '8px 12px',
+                    gap: 4,
+                    maxHeight: 240,
+                    minHeight: 80,
+                    overflowY: 'auto',
+                    border: '1px solid var(--dsw-alias-border-l1, rgba(255,255,255,0.08))',
                     borderRadius: 8,
-                    border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                    background: 'transparent',
-                    color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-                    cursor: clearing ? 'default' : 'pointer',
-                    textAlign: 'left',
+                    padding: '6px',
+                    background: 'var(--dsw-alias-markdown-code-block, #18181a)',
                   },
                 },
-                  createElement('span', { style: { fontSize: 12, fontWeight: 500 } }, title),
-                  createElement('span', { style: { ...labelStyle, fontSize: 11 } }, desc),
+                  loadingSessions
+                    ? createElement('div', { style: { padding: 24, textAlign: 'center', color: '#999', fontSize: 12 } }, '正在读取会话列表中…')
+                    : sessionsList.length === 0
+                    ? createElement('div', { style: { padding: 24, textAlign: 'center', color: '#999', fontSize: 12 } }, '当前没有存储任何会话快照')
+                    : sessionsList.map((s) => {
+                        const checked = selectedSessionIds.has(s.sessionId)
+                        return createElement('label', {
+                          key: s.sessionId,
+                          style: {
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 10,
+                            padding: '6px 8px',
+                            borderRadius: 6,
+                            cursor: 'pointer',
+                            background: checked ? 'rgba(255,255,255,0.06)' : 'transparent',
+                            userSelect: 'none',
+                            transition: 'background 0.12s ease',
+                          },
+                        },
+                          createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 } },
+                            createElement('input', {
+                              type: 'checkbox',
+                              checked,
+                              onChange: (e: { target: { checked: boolean } }) => {
+                                const next = new Set(selectedSessionIds)
+                                if (e.target.checked) next.add(s.sessionId)
+                                else next.delete(s.sessionId)
+                                setSelectedSessionIds(next)
+                              },
+                            }),
+                            createElement('div', { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
+                              createElement('span', {
+                                style: {
+                                  fontSize: 12,
+                                  color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                                  fontWeight: 500,
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                },
+                                title: s.title || s.sessionId,
+                              }, s.title || s.sessionId),
+                              createElement('span', {
+                                style: {
+                                  fontSize: 10,
+                                  color: 'var(--dsw-alias-label-tertiary, #777)',
+                                  fontFamily: 'var(--ds-font-family-code, monospace)',
+                                },
+                              }, `${s.sessionId.slice(0, 8)} · ${s.lastModified > 0 ? new Date(s.lastModified).toLocaleDateString() : ''}`),
+                            ),
+                          ),
+                          createElement('span', {
+                            style: {
+                              fontSize: 11,
+                              fontFamily: 'var(--ds-font-family-code, monospace)',
+                              color: 'var(--dsw-alias-label-secondary, #aaa)',
+                              flex: 'none',
+                            },
+                          }, formatBytes(s.totalBytes)),
+                        )
+                      }),
+                ),
+
+                // Footer: Cancel + Next / Confirm
+                createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 4 } },
+                  createElement('button', {
+                    type: 'button',
+                    onClick: () => setDialogStep('closed'),
+                    style: {
+                      padding: '6px 16px',
+                      borderRadius: 6,
+                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                      background: 'transparent',
+                      color: 'var(--dsw-alias-label-secondary, #999)',
+                      fontSize: 12,
+                      cursor: 'pointer',
+                    },
+                  }, '取消'),
+                  createElement('button', {
+                    type: 'button',
+                    disabled: selectedSessionIds.size === 0,
+                    onClick: () => setDialogStep('scope'),
+                    style: {
+                      padding: '6px 18px',
+                      borderRadius: 6,
+                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                      background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
+                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: selectedSessionIds.size === 0 ? 'default' : 'pointer',
+                      opacity: selectedSessionIds.size === 0 ? 0.5 : 1,
+                    },
+                  }, '确定'),
+                ),
+              )
+            : createElement('div', {
+                onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+                style: {
+                  width: 'min(460px, 92vw)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 14,
+                  padding: 20,
+                  borderRadius: 14,
+                  border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                  background: 'var(--dsw-specific-sidebar-fill, #202021)',
+                  boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+                },
+              },
+                createElement('div', {
+                  style: { fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary, #e6e6e6)' },
+                }, '清理快照缓存'),
+                createElement('div', { style: { ...labelStyle, lineHeight: 1.6 } },
+                  `已选择 ${selectedSessionIds.size} 个会话。此操作将删除对应会话的快照历史，`,
+                  createElement('strong', { style: { color: '#e5534b' } }, '不可恢复'),
+                  '。你的项目代码本身不受影响。'),
+                createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                  createElement('button', {
+                    type: 'button',
+                    disabled: clearing,
+                    onClick: () => void doClear('session'),
+                    style: {
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'flex-start',
+                      gap: 2,
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                      background: 'transparent',
+                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                      cursor: clearing ? 'default' : 'pointer',
+                      textAlign: 'left',
+                    },
+                  },
+                    createElement('span', { style: { fontSize: 12, fontWeight: 500 } }, '仅会话'),
+                    createElement('span', { style: { ...labelStyle, fontSize: 11 } }, '删除所选会话的对话历史快照（repos/）'),
+                  ),
+                  createElement('button', {
+                    type: 'button',
+                    disabled: clearing,
+                    onClick: () => void doClear('workspace'),
+                    style: {
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'flex-start',
+                      gap: 2,
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                      background: 'transparent',
+                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                      cursor: clearing ? 'default' : 'pointer',
+                      textAlign: 'left',
+                    },
+                  },
+                    createElement('span', { style: { fontSize: 12, fontWeight: 500 } }, '仅工作区'),
+                    createElement('span', { style: { ...labelStyle, fontSize: 11 } }, '删除所选会话的代码快照（repos-ws/）'),
+                  ),
+                  createElement('button', {
+                    type: 'button',
+                    disabled: clearing,
+                    onClick: () => void doClear('both'),
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                      background: 'transparent',
+                      color: 'var(--dsw-alias-label-primary, #e6e6e6)',
+                      cursor: clearing ? 'default' : 'pointer',
+                      textAlign: 'left',
+                    },
+                  },
+                    createElement('span', { style: { fontSize: 12, fontWeight: 500 } }, '会话+工作区'),
+                  ),
+                ),
+                createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+                  createElement('button', {
+                    type: 'button',
+                    disabled: clearing,
+                    onClick: () => setDialogStep('sessions'),
+                    style: {
+                      padding: '6px 12px',
+                      borderRadius: 6,
+                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                      background: 'transparent',
+                      color: 'var(--dsw-alias-label-secondary, #999)',
+                      fontSize: 12,
+                      cursor: clearing ? 'default' : 'pointer',
+                    },
+                  }, '← 上一步'),
+                  createElement('button', {
+                    type: 'button',
+                    disabled: clearing,
+                    onClick: () => setDialogStep('closed'),
+                    style: {
+                      padding: '6px 16px',
+                      borderRadius: 6,
+                      border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
+                      background: 'transparent',
+                      color: 'var(--dsw-alias-label-secondary, #999)',
+                      fontSize: 12,
+                      cursor: clearing ? 'default' : 'pointer',
+                    },
+                  }, '取消'),
                 ),
               ),
-            ),
-            createElement('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
-              createElement('button', {
-                type: 'button',
-                disabled: clearing,
-                onClick: () => setDialogOpen(false),
-                style: {
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-                  background: 'transparent',
-                  color: 'var(--dsw-alias-label-secondary, #999)',
-                  fontSize: 12,
-                  cursor: clearing ? 'default' : 'pointer',
-                },
-              }, '取消'),
-            ),
-          ),
         )
       : null,
   )
@@ -1730,9 +1970,6 @@ function HistoryRewindSettingsPage(): ReactNode {
       minHeight: 0,
       padding: '4px 0',
       flex: 1,
-      // The gitignore textarea grows to fill, and the cache card sits below it;
-      // on a short viewport the page scrolls rather than clipping the card.
-      overflowY: 'auto',
     },
   },
     createElement('div', {

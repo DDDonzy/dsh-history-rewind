@@ -20,7 +20,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  ensureHistoryRoot, cacheUsage, clearCache, readConfig, writeConfig,
+  ensureHistoryRoot, cacheUsage, clearCache, readConfig, writeConfig, listStoredSessions,
 } from '../src/store.ts'
 import { HISTORY_REWIND_DEFAULTS } from '../src/constants.ts'
 
@@ -168,4 +168,49 @@ test('usage tolerates a missing history root instead of throwing', async () => {
   const usage = await cacheUsage(root)
   assert.equal(usage.totalBytes, 0)
   assert.equal(usage.capacityBytes, 100 * 1024 ** 3)
+})
+
+test('listStoredSessions aggregates sizes and timestamps for each session', async () => {
+  const { root, cleanup } = await seeded()
+
+  const list = await listStoredSessions(root)
+  assert.equal(list.length, 2)
+  const sessionA = list.find((s) => s.sessionId === 'a')
+  const sessionB = list.find((s) => s.sessionId === 'b')
+  assert.ok(sessionA !== undefined)
+  assert.ok(sessionB !== undefined)
+
+  // session 'a': repos (200) + repos-ws (50) + backups (30 + 70 = 100) = 350
+  assert.equal(sessionA.sessionBytes, 200)
+  assert.equal(sessionA.workspaceBytes, 50)
+  assert.equal(sessionA.backupsBytes, 100)
+  assert.equal(sessionA.totalBytes, 350)
+
+  // session 'b': repos (100) = 100
+  assert.equal(sessionB.sessionBytes, 100)
+  assert.equal(sessionB.workspaceBytes, 0)
+  assert.equal(sessionB.totalBytes, 100)
+
+  await cleanup()
+})
+
+test('clearing specific sessions only removes selected session repositories and backups', async () => {
+  const { root, cleanup } = await seeded()
+
+  // Clear only session 'a'
+  const result = await clearCache(root, 'both', ['a'])
+  assert.equal(result.ok, true)
+  assert.equal(result.freedBytes, 350)
+
+  const list = await listStoredSessions(root)
+  assert.equal(list.length, 1)
+  assert.equal(list[0]!.sessionId, 'b')
+
+  const after = await cacheUsage(root)
+  assert.equal(after.sessionBytes, 100)
+  assert.equal(after.workspaceBytes, 0)
+  assert.equal(after.backupsBytes, 0)
+  assert.equal(after.totalBytes, 100)
+
+  await cleanup()
 })

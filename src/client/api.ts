@@ -320,12 +320,36 @@ export async function getCacheUsage(): Promise<CacheUsageResult | null> {
 /** What a clear request targets. */
 export type CacheScope = 'session' | 'workspace' | 'both'
 
+/** Stored session facts returned by GET /cache/sessions. */
+export interface StoredSession {
+  sessionId: string
+  sessionBytes: number
+  workspaceBytes: number
+  backupsBytes: number
+  totalBytes: number
+  title?: string
+  lastModified: number
+}
+
+/** Get list of all sessions that have shadow store data. */
+export async function getCacheSessions(): Promise<{ ok: boolean; sessions?: StoredSession[] }> {
+  const data = await get(`${ROUTE_PREFIX}/cache/sessions`)
+  if (data === null || data.ok !== true) return { ok: false }
+  return {
+    ok: true,
+    sessions: Array.isArray(data.sessions) ? (data.sessions as StoredSession[]) : [],
+  }
+}
+
 /**
- * Clear the shadow store for one or both areas. IRREVERSIBLE: this drops the
- * rewind history itself, not just cached derivatives.
+ * Clear the shadow store for one or both areas, optionally scoped to specific sessions.
+ * IRREVERSIBLE: this drops the rewind history itself, not just cached derivatives.
  */
-export async function clearCache(scope: CacheScope): Promise<{ ok: boolean; freedBytes?: number; failed?: number; reason?: string }> {
-  const data = await post(`${ROUTE_PREFIX}/cache/clear`, { scope })
+export async function clearCache(
+  scope: CacheScope,
+  sessionIds?: string[],
+): Promise<{ ok: boolean; freedBytes?: number; failed?: number; reason?: string }> {
+  const data = await post(`${ROUTE_PREFIX}/cache/clear`, { scope, sessionIds })
   if (data === null) return { ok: false, reason: 'transport' }
   return {
     ok: data.ok === true,

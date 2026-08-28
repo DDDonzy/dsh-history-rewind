@@ -346,6 +346,92 @@ export async function cacheUsage(root: string): Promise<CacheUsage> {
   }
 }
 
+/** Stored session usage summary for the session list picker. */
+export interface StoredSessionItem {
+  sessionId: string
+  sessionBytes: number
+  workspaceBytes: number
+  backupsBytes: number
+  totalBytes: number
+  lastModified: number
+}
+
+/**
+ * List all sessions currently holding data in the shadow store, with their
+ * per-area byte counts and last modified timestamps.
+ * @param root - history root.
+ * @returns sorted list of session items (newest first).
+ */
+export async function listStoredSessions(root: string): Promise<StoredSessionItem[]> {
+  const ids = new Set<string>()
+
+  // 1. Scan repos/ for session-<id>.git
+  const reposEntries = await readdir(join(root, REPOS_DIRNAME)).catch(() => [])
+  for (const name of reposEntries) {
+    if (name.startsWith('session-') && name.endsWith('.git')) {
+      ids.add(name.slice('session-'.length, -'.git'.length))
+    }
+  }
+
+  // 2. Scan repos-ws/ for session-<seg>.git
+  const wsEntries = await readdir(join(root, REPOS_WS_DIRNAME)).catch(() => [])
+  for (const name of wsEntries) {
+    if (name.startsWith('session-') && name.endsWith('.git')) {
+      ids.add(name.slice('session-'.length, -'.git'.length))
+    }
+  }
+
+  // 3. Scan backups/ for session-<id> and ws-session-<seg>
+  const backupEntries = await readdir(join(root, BACKUPS_DIRNAME)).catch(() => [])
+  for (const name of backupEntries) {
+    if (name.startsWith('ws-session-')) {
+      ids.add(name.slice('ws-session-'.length))
+    } else if (name.startsWith('session-')) {
+      ids.add(name.slice('session-'.length))
+    }
+  }
+
+  const items: StoredSessionItem[] = []
+  for (const sessionId of ids) {
+    const sRepo = sessionRepoDir(root, sessionId)
+    const wsRepo = workspaceRepoDir(root, sessionId)
+    const sBackup = sessionBackupDir(root, sessionId)
+    const wsBackup = workspaceBackupDir(root, sessionId)
+
+    const [sessionBytes, workspaceBytes, sBackupBytes, wsBackupBytes] = await Promise.all([
+      dirSize(sRepo),
+      dirSize(wsRepo),
+      dirSize(sBackup),
+      dirSize(wsBackup),
+    ])
+
+    const backupsBytes = sBackupBytes + wsBackupBytes
+    const totalBytes = sessionBytes + workspaceBytes + backupsBytes
+
+    // Determine latest modified timestamp across existing dirs
+    let lastModified = 0
+    for (const dir of [sRepo, wsRepo, sBackup, wsBackup]) {
+      try {
+        const info = await stat(dir)
+        if (info.mtimeMs > lastModified) lastModified = info.mtimeMs
+      } catch {
+        // Not present, skip
+      }
+    }
+
+    items.push({
+      sessionId,
+      sessionBytes,
+      workspaceBytes,
+      backupsBytes,
+      totalBytes,
+      lastModified,
+    })
+  }
+
+  return items.sort((a, b) => b.lastModified - a.lastModified)
+}
+
 /** Outcome of one cache-clear request. */
 export interface ClearCacheResult {
   ok: boolean
@@ -359,26 +445,84 @@ export interface ClearCacheResult {
 
 /**
  * Delete the CONTENTS of one or both shadow-repo areas, plus the matching
- * pre-rewind backups.
+ * pre-rewind backups, optionally filtered to specific session IDs.
  *
- * Irreversible by design and intentionally not selective: this is the "reclaim
- * the disk" action, so it drops whole histories rather than trying to guess
- * which commits are still wanted. The area directories themselves are kept so
- * later git calls that use them as cwd cannot hit ENOENT.
+ * Irreversible by design: drops histories for the chosen scope and sessions.
+ * The area directories themselves are kept so later git calls that use them as
+ * cwd cannot hit ENOENT.
  *
- * Backups are scoped by their naming convention: workspace copies live in
- * `ws-session-*`, session copies in `session-*`. Clearing only the session area
- * therefore leaves workspace backups alone, and vice versa.
  * @param root - history root.
- * @param scope - which area(s) to clear.
+ * @param scope - which area(s) to clear ('session' | 'workspace' | 'both').
+ * @param sessionIds - optional list of specific session IDs to clear; if omitted, clears all.
  * @returns bytes freed and per-entry success counts.
  */
-export async function clearCache(root: string, scope: CacheScope): Promise<ClearCacheResult> {
+export async function clearCache(
+  root: string,
+  scope: CacheScope,
+  sessionIds?: string[],
+): Promise<ClearCacheResult> {
   const wantSession = scope === 'session' || scope === 'both'
   const wantWorkspace = scope === 'workspace' || scope === 'both'
 
-  // Repo areas are measured up front (whole-area deletion); backups are summed
-  // per entry inside the walk, since only the matching ones get dropped.
+  // Selective clear for specific session IDs
+  if (sessionIds !== undefined && sessionIds.length > 0) {
+    let freedBytes = 0
+    let removed = 0
+    let failed = 0
+    const idSet = new Set(sessionIds)
+
+    for (const id of idSet) {
+      if (wantSession) {
+        const sRepo = sessionRepoDir(root, id)
+        try {
+          if (existsSync(sRepo)) {
+            freedBytes += await dirSize(sRepo)
+            await rm(sRepo, { recursive: true, force: true })
+            removed += 1
+          }
+        } catch {
+          failed += 1
+        }
+        const sBackup = sessionBackupDir(root, id)
+        try {
+          if (existsSync(sBackup)) {
+            freedBytes += await dirSize(sBackup)
+            await rm(sBackup, { recursive: true, force: true })
+            removed += 1
+          }
+        } catch {
+          failed += 1
+        }
+      }
+
+      if (wantWorkspace) {
+        const wsRepo = workspaceRepoDir(root, id)
+        try {
+          if (existsSync(wsRepo)) {
+            freedBytes += await dirSize(wsRepo)
+            await rm(wsRepo, { recursive: true, force: true })
+            removed += 1
+          }
+        } catch {
+          failed += 1
+        }
+        const wsBackup = workspaceBackupDir(root, id)
+        try {
+          if (existsSync(wsBackup)) {
+            freedBytes += await dirSize(wsBackup)
+            await rm(wsBackup, { recursive: true, force: true })
+            removed += 1
+          }
+        } catch {
+          failed += 1
+        }
+      }
+    }
+
+    return { ok: failed === 0, freedBytes, removed, failed }
+  }
+
+  // Whole-store clear (all sessions)
   const before = await cacheUsage(root)
   const repoFreed = (wantSession ? before.sessionBytes : 0)
     + (wantWorkspace ? before.workspaceBytes : 0)

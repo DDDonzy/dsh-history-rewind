@@ -24,7 +24,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdirSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { ROUTE_PREFIX, type HistoryRewindConfig } from './constants.ts'
-import { historyRoot, sessionRepoDir, ensureHistoryRoot, readConfig, writeConfig, cacheUsage, clearCache } from './store.ts'
+import { historyRoot, sessionRepoDir, ensureHistoryRoot, readConfig, writeConfig, cacheUsage, clearCache, listStoredSessions } from './store.ts'
 import type { SubprocessLike } from './git-runner.ts'
 import { runGit, firstLine } from './git-runner.ts'
 import { argvRevParseCommit } from './git-commands.ts'
@@ -209,6 +209,23 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
+      // GET /cache/sessions — list of sessions holding data in the shadow store.
+      if (pathname === `${ROUTE_PREFIX}/cache/sessions` && method === 'GET') {
+        const stored = await listStoredSessions(engine.root)
+        const enriched = stored.map((item) => {
+          const s = engine.sessions?.get(item.sessionId)
+          const title = (s as unknown as { title?: string })?.title
+            ?? s?.header?.title
+            ?? (s as unknown as { header?: { customTitle?: string } })?.header?.customTitle
+          return {
+            ...item,
+            ...(typeof title === 'string' && title.length > 0 ? { title } : {}),
+          }
+        })
+        json(res, 200, { ok: true, sessions: enriched })
+        return
+      }
+
       if (method !== 'POST') {
         json(res, 404, { ok: false, reason: 'not-found' })
         return
@@ -255,8 +272,8 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
-      // POST /cache/clear — { scope: 'session' | 'workspace' | 'both' }.
-      // IRREVERSIBLE: drops whole shadow histories for the chosen area(s).
+      // POST /cache/clear — { scope: 'session' | 'workspace' | 'both', sessionIds?: string[] }.
+      // IRREVERSIBLE: drops shadow histories for the chosen scope and sessions.
       // Global like /config, so it precedes the sessionId-required branches.
       if (pathname === `${ROUTE_PREFIX}/cache/clear`) {
         let clearBody: unknown
@@ -272,7 +289,10 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
           json(res, 400, { ok: false, reason: 'bad-scope' })
           return
         }
-        const cleared = await clearCache(engine.root, scope)
+        const sessionIds = Array.isArray(clearArgs.sessionIds)
+          ? (clearArgs.sessionIds.filter((id) => typeof id === 'string' && id.length > 0) as string[])
+          : undefined
+        const cleared = await clearCache(engine.root, scope, sessionIds)
         json(res, 200, { ...cleared, usage: await cacheUsage(engine.root) })
         return
       }
