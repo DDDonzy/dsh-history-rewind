@@ -563,7 +563,11 @@ export const STYLES = [
   '  color: #ffffff;',
   '}',
   '.dsh-history-button.primary:hover:not(:disabled) {',
-  '  background: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #3b74e6);',
+  '  background: var(--dsw-alias-brand-primary-hover, #3b74e6);',
+  '}',
+  '.dsh-history-button.primary:disabled {',
+  '  background: var(--dsw-alias-brand-primary, #4d88ff);',
+  '  opacity: 0.5;',
   '}',
   /* Outline: bordered capsule on transparent fill (figma Dialog Cancel). */
   '.dsh-history-button.outline {',
@@ -572,6 +576,10 @@ export const STYLES = [
   '}',
   '.dsh-history-button.outline:hover:not(:disabled) {',
   '  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.06));',
+  '}',
+  '.dsh-history-button.outline:disabled {',
+  '  border-color: rgba(255, 255, 255, 0.12);',
+  '  opacity: 0.4;',
   '}',
   /* Small (delete / compact toolbar remnants). */
   '.dsh-history-button.sm {',

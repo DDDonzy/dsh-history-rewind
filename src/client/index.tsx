@@ -748,12 +748,13 @@ function HistoryStateCard(props: {
   type: 'loading' | 'empty' | 'error'
   errorReason?: string | null
   notice?: string
-  busy?: boolean
+  actionBusy?: 'snapshot' | 'reload' | null
   onSnapshot?: () => void
   onReload?: () => void
   onClose?: () => void
 }): ReactNode {
-  const { type, errorReason, notice, busy, onSnapshot, onReload, onClose } = props
+  const { type, errorReason, notice, actionBusy, onSnapshot, onReload, onClose } = props
+  const isBusy = actionBusy !== null && actionBusy !== undefined
 
   let iconNode: ReactNode
   let title: string
@@ -786,12 +787,13 @@ function HistoryStateCard(props: {
     actionsNode = createElement(
       'button',
       {
+        type: 'button',
         className: `${BUTTON} primary`,
-        disabled: busy === true,
+        disabled: isBusy,
         onClick: onSnapshot,
-        style: { minWidth: 150, height: 36, fontWeight: 500 },
+        style: { minWidth: 140, height: 36, fontWeight: 500 },
       },
-      busy === true ? '正在创建快照…' : '📸 立即创建首个快照',
+      actionBusy === 'snapshot' ? '正在创建…' : '创建首个快照',
     )
   } else {
     // Error state
@@ -811,30 +813,32 @@ function HistoryStateCard(props: {
       createElement('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
       createElement('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
     )
-    title = '时间线数据读取异常'
+    title = '无法加载历史记录'
     desc = errorReason === 'git-unavailable'
-      ? '检测到 Git 环境异常或未安装，请在设置中检查 Git 状态。'
-      : '无法读取当前会话的 Git 影子仓库历史，可能是影子仓库尚未初始化或状态受损。'
+      ? '检测到 Git 环境异常或未安装，快照与回退功能需要 Git 支持。'
+      : '当前会话的快照数据未就绪或索引需要修复。您可以尝试重新加载，或点击下方按钮重新生成快照。'
     actionsNode = createElement('div', { className: STATE_ACTIONS },
       createElement(
         'button',
         {
+          type: 'button',
           className: `${BUTTON} outline`,
-          disabled: busy === true,
+          disabled: isBusy,
           onClick: onReload,
-          style: { minWidth: 100, height: 36 },
+          style: { minWidth: 90, height: 36 },
         },
-        '🔄 重新加载',
+        actionBusy === 'reload' ? '正在加载…' : '重新加载',
       ),
       createElement(
         'button',
         {
+          type: 'button',
           className: `${BUTTON} primary`,
-          disabled: busy === true,
+          disabled: isBusy,
           onClick: onSnapshot,
-          style: { minWidth: 140, height: 36, fontWeight: 500 },
+          style: { minWidth: 120, height: 36, fontWeight: 500 },
         },
-        busy === true ? '正在创建…' : '⚡ 创建 / 修复快照',
+        actionBusy === 'snapshot' ? '正在创建…' : '创建 / 修复快照',
       ),
     )
   }
@@ -846,6 +850,7 @@ function HistoryStateCard(props: {
     createElement('div', { className: STATE_CARD },
       onClose !== undefined
         ? createElement('button', {
+            type: 'button',
             className: STATE_CLOSE,
             title: '关闭 (Esc)',
             onClick: onClose,
@@ -898,6 +903,7 @@ function HistoryPanel(props: {
   const [errorReason, setErrorReason] = useState<string | null>(null)
   const [head, setHead] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [actionBusy, setActionBusy] = useState<'snapshot' | 'reload' | null>(null)
   const [selected, setSelected] = useState<TimelineRow | null>(null)
   const [notice, setNotice] = useState<string>(initialNotice ?? '')
   // A failure notice pushed while the panel was closed arrives through the
@@ -958,7 +964,7 @@ function HistoryPanel(props: {
   }
 
   const load = async (): Promise<void> => {
-    setBusy(true)
+    setActionBusy('reload')
     try {
       const [result, status] = await Promise.all([
         fetchTimeline(sessionId),
@@ -973,7 +979,7 @@ function HistoryPanel(props: {
       }
       if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
     } finally {
-      setBusy(false)
+      setActionBusy(null)
     }
   }
   useEffect(() => { void load() }, [sessionId])
@@ -1240,15 +1246,18 @@ function HistoryPanel(props: {
   }
 
   const doSnapshot = async (): Promise<void> => {
-    setBusy(true)
+    setActionBusy('snapshot')
     setNotice('')
-    const result = await manualSnapshot(sessionId)
-    setBusy(false)
-    if (result.ok) {
-      setNotice(`已快照 ✓ ${result.snap ?? ''}`)
-      await load()
-    } else {
-      setNotice(`快照失败：${result.reason ?? 'unknown'}`)
+    try {
+      const result = await manualSnapshot(sessionId)
+      if (result.ok) {
+        setNotice(`已快照 ✓ ${result.snap ?? ''}`)
+        await load()
+      } else {
+        setNotice(`快照失败：${result.reason ?? 'unknown'}`)
+      }
+    } finally {
+      setActionBusy(null)
     }
   }
 
@@ -1266,7 +1275,7 @@ function HistoryPanel(props: {
         type: 'error',
         errorReason,
         notice,
-        busy,
+        actionBusy,
         onSnapshot: () => void doSnapshot(),
         onReload: () => void load(),
         onClose: onRewound,
@@ -1278,7 +1287,7 @@ function HistoryPanel(props: {
       createElement(HistoryStateCard, {
         type: 'empty',
         notice,
-        busy,
+        actionBusy,
         onSnapshot: () => void doSnapshot(),
         onClose: onRewound,
       }),
