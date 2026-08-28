@@ -58,7 +58,18 @@ export async function timelineRows(
 ): Promise<TimelineRow[] | null> {
   const repo: ShadowRepo = { gitDir: repoDir }
   const res = await runGit(subprocess, argvLogAll(repo), root)
-  if (res.exitCode !== 0) return null
+  if (res.exitCode !== 0) {
+    const err = (res.stderr || '').toLowerCase()
+    if (
+      err.includes('does not have any commits')
+      || err.includes('bad default revision')
+      || err.includes('unknown revision')
+      || (res.stdout.trim().length === 0 && res.stderr.trim().length === 0)
+    ) {
+      return []
+    }
+    return null
+  }
   const rows: TimelineRow[] = []
   for (const line of res.stdout.split('\n')) {
     const text = line.trim()
