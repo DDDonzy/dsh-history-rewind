@@ -1010,10 +1010,18 @@ function HistoryPanel(props: {
   const load = async (): Promise<void> => {
     setActionBusy('reload')
     try {
-      // Temporary review mock: simulate network delay then show error state
-      await new Promise((r) => setTimeout(r, 600))
-      setRows(null)
-      setErrorReason('git-unavailable')
+      const [result, status] = await Promise.all([
+        fetchTimeline(sessionId),
+        get(`${ROUTE_PREFIX}/status?sessionId=${encodeURIComponent(sessionId)}`),
+      ])
+      if (result.ok && result.rows !== undefined) {
+        setRows(result.rows)
+        setErrorReason(null)
+      } else {
+        setRows(null)
+        setErrorReason(result.reason ?? 'unknown')
+      }
+      if (status !== null && typeof status.activeTip === 'string') setHead(status.activeTip)
     } finally {
       setActionBusy(null)
     }
@@ -2265,7 +2273,7 @@ export function apply(ctx: Context): void {
   document.body.appendChild(host)
   const root = createRoot(host)
   const listeners = new Set<() => void>()
-  let open = true
+  let open = false
   const setOpen = (value: boolean): void => {
     if (open === value) return
     open = value
