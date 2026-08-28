@@ -2157,6 +2157,10 @@ export function apply(ctx: Context): void {
     open = value
     for (const listener of listeners) listener()
   }
+  if (typeof window !== 'undefined') {
+    (window as unknown as { __DSH_HISTORY_REWIND_OPEN__?: (val?: boolean) => void }).__DSH_HISTORY_REWIND_OPEN__ = (val = true) => setOpen(val)
+    window.addEventListener('dsh:open-history', () => setOpen(true))
+  }
   /** Failure notice from a rewind that failed while the panel was closed
    *  (it closes immediately on confirm); delivered to the next panel mount. */
   let pendingRewindNotice: string | null = null
