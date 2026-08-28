@@ -1469,10 +1469,10 @@ function CacheCard(): ReactNode {
   const [usage, setUsage] = useState<CacheUsageResult | null>(null)
   const [capacityText, setCapacityText] = useState('')
   const [loaded, setLoaded] = useState(false)
-  const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState('')
   const [dialogOpen, setDialogOpen] = useState(false)
   const [clearing, setClearing] = useState(false)
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const load = async (): Promise<void> => {
     const [config, measured] = await Promise.all([getConfig(), getCacheUsage()])
@@ -1484,22 +1484,18 @@ function CacheCard(): ReactNode {
   }
   useEffect(() => { void load() }, [])
 
-  const doSaveCapacity = async (): Promise<void> => {
-    const gb = Number(capacityText)
-    if (!Number.isFinite(gb) || gb <= 0) {
-      setNotice('请输入大于 0 的数字')
-      return
+  // Auto-save capacity on input change with digits-only validation
+  const onCapacityChange = (valStr: string): void => {
+    const cleaned = valStr.replace(/\D/g, '')
+    setCapacityText(cleaned)
+    if (autoSaveTimer.current !== null) clearTimeout(autoSaveTimer.current)
+    const gb = Number(cleaned)
+    if (Number.isFinite(gb) && gb > 0) {
+      setUsage((prev) => (prev !== null ? { ...prev, capacityBytes: Math.round(gb * 1024 ** 3) } : null))
+      autoSaveTimer.current = setTimeout(async () => {
+        await setCacheCapacity(gb)
+      }, 350)
     }
-    setSaving(true)
-    setNotice('')
-    const result = await setCacheCapacity(gb)
-    setSaving(false)
-    if (!result.ok) {
-      setNotice(`保存失败：${result.reason ?? 'unknown'}`)
-      return
-    }
-    setNotice('已保存 ✓')
-    await load()
   }
 
   const doClear = async (scope: CacheScope): Promise<void> => {
@@ -1509,8 +1505,8 @@ function CacheCard(): ReactNode {
     setClearing(false)
     setDialogOpen(false)
     setNotice(result.ok
-      ? `已清空 ✓ 释放 ${formatBytes(result.freedBytes ?? 0)}`
-      : `清空未完成：${result.failed ?? 0} 项无法删除${result.reason !== undefined ? `（${result.reason}）` : ''}`)
+      ? `已清理 ✓ 释放 ${formatBytes(result.freedBytes ?? 0)}`
+      : `清理未完成：${result.failed ?? 0} 项无法删除${result.reason !== undefined ? `（${result.reason}）` : ''}`)
     await load()
   }
 
@@ -1541,21 +1537,22 @@ function CacheCard(): ReactNode {
     }),
     createElement('span', { style: { fontWeight: 600, fontSize: 13 } }, '快照缓存'),
 
-    // Row 1: capacity setting, value right-aligned.
+    // Row 1: capacity setting, numeric text input only, right-aligned, auto-saved.
     createElement('div', {
       style: { display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' },
     },
       createElement('span', { style: labelStyle }, '缓存容量上限'),
       createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
         createElement('input', {
-          type: 'number',
-          min: 1,
-          step: 1,
+          type: 'text',
+          inputMode: 'numeric',
+          pattern: '[0-9]*',
           value: capacityText,
           disabled: !loaded,
-          onChange: (event: { target: { value: string } }) => setCapacityText(event.target.value),
+          placeholder: '100',
+          onChange: (event: { target: { value: string } }) => onCapacityChange(event.target.value),
           style: {
-            width: 88,
+            width: 80,
             textAlign: 'right',
             padding: '5px 8px',
             borderRadius: 6,
@@ -1567,78 +1564,67 @@ function CacheCard(): ReactNode {
           },
         }),
         createElement('span', { style: labelStyle }, 'GB'),
-        createElement('button', {
-          type: 'button',
-          disabled: saving || !loaded,
-          onClick: () => void doSaveCapacity(),
-          style: {
-            padding: '5px 14px',
-            borderRadius: 6,
-            border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
-            background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
-            color: 'var(--dsw-alias-label-primary, #e6e6e6)',
-            fontSize: 12,
-            cursor: saving ? 'default' : 'pointer',
-          },
-        }, saving ? '保存中…' : '保存'),
       ),
     ),
 
-    // Row 2: usage bar + clear action.
-    createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
+    // Row 2: usage progress bar + health details.
+    createElement('div', {
+      style: { display: 'flex', flexDirection: 'column', gap: 4, width: '100%' },
+    },
       createElement('div', {
-        style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
+        style: {
+          height: 8,
+          width: '100%',
+          borderRadius: 999,
+          background: 'var(--dsw-alias-border-l1, rgba(255,255,255,0.10))',
+          overflow: 'hidden',
+        },
       },
         createElement('div', {
           style: {
-            height: 8,
-            width: '100%',
+            height: '100%',
+            width: `${pct}%`,
+            background: barColor,
             borderRadius: 999,
-            background: 'var(--dsw-alias-border-l1, rgba(255,255,255,0.10))',
-            overflow: 'hidden',
+            transition: 'width 0.3s ease, background 0.3s ease',
           },
-        },
-          createElement('div', {
-            style: {
-              height: '100%',
-              width: `${pct}%`,
-              background: barColor,
-              borderRadius: 999,
-              transition: 'width 0.3s ease, background 0.3s ease',
-            },
-          }),
-        ),
-        createElement('div', { style: { ...labelStyle, display: 'flex', gap: 8, flexWrap: 'wrap' } },
-          createElement('span', null, usage === null
-            ? '统计中…'
-            : `${formatBytes(total)} / ${formatBytes(capacity)}（${pct.toFixed(1)}%）`),
-          createElement('span', { style: { color: barColor } }, health),
-        ),
-        usage !== null
-          ? createElement('div', { style: { ...labelStyle, fontSize: 11 } },
-              `会话 ${formatBytes(usage.sessionBytes)} · 工作区 ${formatBytes(usage.workspaceBytes)} · 备份 ${formatBytes(usage.backupsBytes)}`)
-          : null,
+        }),
       ),
+      createElement('div', { style: { ...labelStyle, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'space-between' } },
+        createElement('span', null, usage === null
+          ? '统计中…'
+          : `${formatBytes(total)} / ${formatBytes(capacity)}（${pct.toFixed(1)}%）`),
+        createElement('span', { style: { color: barColor } }, health),
+      ),
+      usage !== null
+        ? createElement('div', { style: { ...labelStyle, fontSize: 11 } },
+            `会话 ${formatBytes(usage.sessionBytes)} · 工作区 ${formatBytes(usage.workspaceBytes)} · 备份 ${formatBytes(usage.backupsBytes)}`)
+        : null,
+    ),
+
+    // Row 3: clear action button below the bar + status notice.
+    createElement('div', {
+      style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 2 },
+    },
+      notice.length > 0
+        ? createElement('span', { style: labelStyle }, notice)
+        : createElement('span', null),
       createElement('button', {
         type: 'button',
         disabled: !loaded || clearing,
         onClick: () => setDialogOpen(true),
         style: {
-          flex: 'none',
-          padding: '5px 14px',
+          padding: '5px 16px',
           borderRadius: 6,
           border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',
           background: 'var(--dsw-alias-button-tool-bar-fill, #2d2d2e)',
           color: 'var(--dsw-alias-label-primary, #e6e6e6)',
           fontSize: 12,
+          fontWeight: 500,
           cursor: clearing ? 'default' : 'pointer',
         },
-      }, clearing ? '清空中…' : 'Clear'),
+      }, clearing ? '清理中…' : '清理缓存'),
     ),
-
-    notice.length > 0
-      ? createElement('span', { style: labelStyle }, notice)
-      : null,
 
     // Scope picker. Deliberately spells out that this erases history and is
     // not undoable — unlike a rewind, there is nothing left to jump back to.
@@ -1671,11 +1657,11 @@ function CacheCard(): ReactNode {
           },
             createElement('div', {
               style: { fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary, #e6e6e6)' },
-            }, '清空快照缓存'),
+            }, '清理快照缓存'),
             createElement('div', { style: { ...labelStyle, lineHeight: 1.6 } },
-              '选择要清空的范围。此操作会删除对应的影子仓库历史，',
+              '选择要清理的范围。此操作会删除对应的影子仓库历史，',
               createElement('strong', { style: { color: '#e5534b' } }, '不可恢复'),
-              '，清空后这些版本无法再回退。你的项目代码本身不受影响。'),
+              '，清理后这些版本无法再回退。你的项目代码本身不受影响。'),
             createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
               ...([
                 ['session', '仅会话', '删除对话历史快照（repos/）'],
@@ -1767,8 +1753,8 @@ function HistoryRewindSettingsPage(): ReactNode {
       },
     }, '本插件用 git 影子仓库实现会话快照与回退，因此依赖 Git。'),
     createElement(GitPluginCard),
-    createElement(GitignoreTemplateCard),
     createElement(CacheCard),
+    createElement(GitignoreTemplateCard),
   )
 }
 
