@@ -2166,7 +2166,8 @@ export function apply(ctx: Context): void {
   let pendingRewindNotice: string | null = null
 
   const HistoryPanelShell = () => {
-    const current = svc.list.getSnapshot().current
+    const snap = svc.list.getSnapshot()
+    const current = snap.current
     // The runtime's list drops the session while a rewind detaches it on the
     // host (current transiently undefined). Keep the LAST known session id so
     // the panel stays mounted (and its content stable) across that gap instead
@@ -2176,7 +2177,7 @@ export function apply(ctx: Context): void {
     useEffect(() => {
       if (current !== undefined) lastId.current = current
     }, [current])
-    const sessionId = current ?? lastId.current
+    const sessionId = current ?? lastId.current ?? (snap.ids && snap.ids.length > 0 ? snap.ids[0] : undefined)
     const [, force] = useState(0)
     useEffect(() => {
       const listener = (): void => force((v) => v + 1)
@@ -2288,7 +2289,7 @@ export function apply(ctx: Context): void {
       }
     }, [open])
 
-    const panel = open && sessionId !== undefined
+    const panel = open
       ? createElement('div', {
           className: MODAL_BACKDROP,
           onClick: () => setOpen(false),
@@ -2337,21 +2338,63 @@ export function apply(ctx: Context): void {
             },
             onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
           },
-            createElement(HistoryPanel, {
-              sessionId,
-              rebind: (id) => rebindView(svc, id),
-              onRewound: () => setOpen(false),
-              onRewindFailed: (text) => {
-                pendingRewindNotice = text
-                setOpen(true)
-              },
-              onProgress: (phase, sha) => setProgress({ phase, sha, fading: false }),
-              portalTo: host,
-              onDialogOpen: setDialogOpen,
-              onLanesChange: setActiveLanes,
-              initialNotice: pendingRewindNotice ?? undefined,
-              onInitialNoticeConsumed: () => { pendingRewindNotice = null },
-            }),
+            sessionId !== undefined
+              ? createElement(HistoryPanel, {
+                  sessionId,
+                  rebind: (id) => rebindView(svc, id),
+                  onRewound: () => setOpen(false),
+                  onRewindFailed: (text) => {
+                    pendingRewindNotice = text
+                    setOpen(true)
+                  },
+                  onProgress: (phase, sha) => setProgress({ phase, sha, fading: false }),
+                  portalTo: host,
+                  onDialogOpen: setDialogOpen,
+                  onLanesChange: setActiveLanes,
+                  initialNotice: pendingRewindNotice ?? undefined,
+                  onInitialNoticeConsumed: () => { pendingRewindNotice = null },
+                })
+              : createElement('div', {
+                  className: PANEL,
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    height: '100%',
+                    padding: 24,
+                  },
+                },
+                  createElement('div', {
+                    className: DIALOG,
+                    style: {
+                      margin: 'auto',
+                      animation: 'dshSlideUp 0.15s ease-out',
+                      width: 'min(420px, 94vw)',
+                    },
+                    onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+                  },
+                    createElement('div', { className: DIALOG_HEAD },
+                      createElement('h2', { className: DIALOG_TITLE }, '提示'),
+                      createElement('button', {
+                        className: DIALOG_CLOSE,
+                        title: '关闭',
+                        onClick: () => setOpen(false),
+                      }, '✕'),
+                    ),
+                    createElement('div', { className: DIALOG_BODY, style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                      createElement('p', {
+                        className: DIALOG_DESCRIPTION,
+                        style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary, #999)', lineHeight: 1.6, padding: 0 },
+                      }, '未检测到活跃会话。请先在左侧选择或创建一个会话。'),
+                    ),
+                    createElement('div', { className: DIALOG_FOOT },
+                      createElement('button', {
+                        className: `${BUTTON} primary`,
+                        onClick: () => setOpen(false),
+                      }, '确定'),
+                    ),
+                  ),
+                ),
           ),
         )
       : null
