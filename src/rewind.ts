@@ -176,7 +176,7 @@ async function wsRepoWithCommit(
  * @param agentCtx - the agent context that carries `agent` (resumed or live).
  * @param files - workspace-relative paths (forward slashes) to observe.
  */
-async function warmFsObservation(agentCtx: unknown, files: readonly string[]): Promise<void> {
+export async function warmFsObservation(agentCtx: unknown, files: readonly string[]): Promise<void> {
   const agent = (agentCtx as { agent?: unknown } | undefined)?.agent
   const session = (agent as { session?: { header?: { cwd?: string } } } | undefined)?.session
   const cwd = session?.header?.cwd
@@ -202,7 +202,7 @@ async function warmFsObservation(agentCtx: unknown, files: readonly string[]): P
 }
 
 /** Current workspace in-scope file list under the same snapshot excludes. */
-async function currentWorkspaceFiles(cwd: string): Promise<string[]> {
+export async function currentWorkspaceFiles(cwd: string): Promise<string[]> {
   try {
     const excludes = await readExcludes(cwd)
     return await workspaceFileList(cwd, excludes)

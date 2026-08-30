@@ -1,6 +1,6 @@
 {
-    "name":  "dsh-history-rewind",
-    "version":  "0.1.0",
+    "name": "dsh-history-rewind",
+    "version": "0.1.0",
     "description": "DeepSeek Harness 可视化 Git Graph 分支历史管理插件：支持对话与工作区双轨快照、多分支自由分叉与精准回退（仅会话/仅代码/双轨全回滚），同窗口原地热重载，影子 Git 仓库零污染、秒级快照、KV Cache 缓存友好。 / Visual Git Graph branch manager for DSH: dual-track (conversation & workspace) branching, turn-level rewind & rollback.",
     "keywords": [
         "deepseek-harness",
@@ -18,58 +18,62 @@
         "conversation-history",
         "ai-coding"
     ],
-    "type":  "module",
-    "main":  "lib/index.js",
-    "exports":  {
-                    ".":  "./lib/index.js",
-                    "./invariant":  "./lib/invariant.js",
-                    "./client":  "./lib/client.js",
-                    "./src/*":  "./src/*",
-                    "./cordis.patch.yml":  "./cordis.patch.yml",
-                    "./package.json":  "./package.json"
-                },
-    "dsh":  {
-                "bundle":  {
-                               "patch":  "./cordis.patch.yml"
-                           },
-                "client":  {
-                               "platform":  "web"
-                           }
-            },
-    "license":  "MIT",
-    "repository":  {
-                       "type":  "git",
-                       "url":  "git+https://github.com/DDDonzy/dsh-history-rewind.git"
-                   },
-    "homepage":  "https://github.com/DDDonzy/dsh-history-rewind#readme",
-    "bugs":  {
-                 "url":  "https://github.com/DDDonzy/dsh-history-rewind/issues"
-             },
-    "files":  [
-                  "lib/index.js",
-                  "lib/invariant.js",
-                  "lib/client.js",
-                  "cordis.patch.yml"
-              ],
-    "scripts":  {
-                    "build":  "tsdown",
-                    "watch":  "tsdown --watch",
-                    "typecheck":  "tsc --noEmit -p tsconfig.json",
-                    "test":  "node --test --experimental-strip-types tests/*.test.ts"
-                },
-    "peerDependencies":  {
-                             "react":  "^18.2.0",
-                             "react-dom":  "^18.2.0",
-                             "@deepseek-ai/cordis":  "^4.0.1"
-                         },
-    "devDependencies":  {
-                            "react":  "^18.3.1",
-                            "react-dom":  "^18.3.1",
-                            "@types/react":  "^18.3.31",
-                            "@types/react-dom":  "^18.3.7",
-                            "@types/node":  "^24.0.0",
-                            "@deepseek-ai/cordis":  "^4.0.1",
-                            "tsdown":  "^0.9.0",
-                            "typescript":  "^5.7.0"
-                        }
+    "type": "module",
+    "main": "lib/index.js",
+    "exports": {
+        ".": "./lib/index.js",
+        "./invariant": "./lib/invariant.js",
+        "./client": "./lib/client.js",
+        "./src/*": "./src/*",
+        "./cordis.patch.yml": "./cordis.patch.yml",
+        "./package.json": "./package.json"
+    },
+    "dsh": {
+        "bundle": {
+            "patch": "./cordis.patch.yml"
+        },
+        "client": {
+            "platform": "web"
+        }
+    },
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/DDDonzy/dsh-history-rewind.git"
+    },
+    "homepage": "https://github.com/DDDonzy/dsh-history-rewind#readme",
+    "bugs": {
+        "url": "https://github.com/DDDonzy/dsh-history-rewind/issues"
+    },
+    "files": [
+        "lib/index.js",
+        "lib/invariant.js",
+        "lib/client.js",
+        "cordis.patch.yml"
+    ],
+    "scripts": {
+        "build": "tsdown",
+        "watch": "tsdown --watch",
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "node --test --experimental-strip-types tests/*.test.ts"
+    },
+    "peerDependencies": {
+        "@deepseek-ai/cordis": "^4.0.1",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0"
+    },
+    "devDependencies": {
+        "@deepseek-ai/cordis": "^4.0.1",
+        "@types/node": "^24.0.0",
+        "@types/react": "^18.3.31",
+        "@types/react-dom": "^18.3.7",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "tsdown": "^0.9.0",
+        "typescript": "^5.7.0"
+    },
+    "dependencies": {
+        "ignore": "^7.0.6",
+        "lucide-react": "^1.35.0"
+    }
 }

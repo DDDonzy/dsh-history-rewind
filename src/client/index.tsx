@@ -6,6 +6,7 @@
  * @module dsh-history-rewind/client
  */
 
+import { ListFilter, X } from 'lucide-react'
 import type { Context } from '@deepseek-ai/cordis'
 import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -13,11 +14,13 @@ import { createRoot } from 'react-dom/client'
 import {
   fetchTimeline, rewind, manualSnapshot, get, gitStatus, installGit, getRewindStatus,
   getConfig, setConfig, setCacheCapacity, getCacheUsage, clearCache, getCacheSessions, getCacheSessionUsage,
+  refineSession,
   type TimelineRow, type CacheScope, type CacheUsageResult, type StoredSession,
 } from './api.ts'
 import { ROUTE_PREFIX, SETTINGS_NAMESPACE, CACHE_WARN_RATIO, CACHE_FULL_RATIO } from '../constants.ts'
 import type { WorkspaceChange } from '../messages.ts'
 import { claimHistoryCommand } from './history-command.ts'
+import { refreshRewoundSession, type RebindableClientSession } from './session-refresh.ts'
 import { buildGraph, roadSet, type GraphRow } from './layout.ts'
 import {
   injectStyles,
@@ -40,6 +43,9 @@ import {
   FILE_CHIP,
   FILE_CLIP,
   FILE_INDENT,
+  CURATION_TURN_CHIP,
+  SELECTION_CLOSE,
+  ACTION_DOCK,
   DIALOG,
   DIALOG_HEAD,
   DIALOG_TITLE,
@@ -65,13 +71,7 @@ export const inject = ['sessions', 'slots']
  *  while the host session is transiently disposed (staged/frozen view). */
 interface ScopeRecordLike {
   binding?: {
-    session?: {
-      resync?: () => Promise<unknown>
-      /** `host/session-removed` flag the runtime sets on the resident instance.
-       *  A rewind re-adds the same session id, but the runtime never clears it —
-       *  the composer would stay locked as 「会话不可用」 forever. */
-      removed?: boolean
-    }
+    session?: RebindableClientSession
   }
 }
 
@@ -85,6 +85,7 @@ interface SessionsFace {
     }
     subscribe(listener: () => void): () => void
   }
+  refresh?(): Promise<void>
   clear?(): void
   open?(id: string): void
   scopes?: Map<string, ScopeRecordLike>
@@ -94,6 +95,13 @@ interface SessionsFace {
 
 /** Small delay helper. */
 const wait = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
+
+/** Refresh list membership, then select a newly published derived Session. */
+async function openPublishedSession(sessions: SessionsFace, sessionId: string): Promise<void> {
+  if (sessions.refresh !== undefined) await sessions.refresh()
+  if (sessions.open === undefined) throw new Error('Client Session service exposes no open() operation')
+  sessions.open(sessionId)
+}
 
 /** Rebind session view after a rewind — in place when the runtime allows it.
  *
@@ -115,15 +123,16 @@ async function rebindView(sessions: SessionsFace, sessionId: string): Promise<st
   const session = record?.binding?.session
   if (session !== undefined && typeof session.resync === 'function') {
     try {
-      // The instance survives the host detach (resident-instance rule), but
-      // the runtime never clears the `removed` flag it received from
-      // host/session-removed — the composer would stay locked as
-      // 「会话不可用」 forever. The session is live again (re-added), so clear
-      // the flag as part of the in-place refresh; resync() republishes the
-      // snapshot so the composer unlocks immediately.
-      if (session.removed === true) session.removed = false
-      await session.resync()
-      return '会话视图已原位刷新'
+      // The resident projection store belongs to the pre-rewind artifact and
+      // enforces "higher seq wins". Rebase it before resync, otherwise a
+      // lower/equal-seq target updates the Agent's real model/reasoning route
+      // while the selector UI keeps painting the old projection value.
+      if (await refreshRewoundSession(session)) return '会话视图与模型选择已原位刷新'
+      // A conversation-only resync would leave model/reasoning (and every
+      // other projection) stale. A full reload is the only honest fallback
+      // when this shell exposes resync but not projection generation reset.
+      setTimeout(() => { window.location.reload() }, 400)
+      return '投影重置原语缺失，已自动刷新页面'
     } catch {
       // Instance resync failed (e.g. mid-teardown): fall through to the legacy path.
     }
@@ -249,6 +258,23 @@ function fitFileChips(files: WorkspaceChange[], budget: number): { shown: Worksp
   return { shown: files.slice(0, count), hidden: files.length - count }
 }
 
+/** Fit plain labels with the same one-line chip budget used for file names. */
+function fitLabelChips(labels: string[], budget: number): { shown: string[]; hidden: number } {
+  if (labels.length === 0) return { shown: [], hidden: 0 }
+  let used = 0
+  let count = 0
+  for (let i = 0; i < labels.length; i += 1) {
+    const next = chipWidth(labels[i]!) + (count > 0 ? CHIP_GAP_W : 0)
+    const rest = labels.length - (i + 1)
+    const reserve = rest > 0 ? CHIP_GAP_W + chipWidth(`…${rest}`) : 0
+    if (count > 0 && used + next + reserve > budget) break
+    used += next
+    count += 1
+  }
+  if (count === 0) count = 1
+  return { shown: labels.slice(0, count), hidden: labels.length - count }
+}
+
 /** Render a changed-file chip line: as many names as fit on one line, then a
  *  trailing "…N". With `indent` (TURN rows) a leading spacer shifts the chips to
  *  the message TEXT column — the line aligns with the USER/ASST content, not
@@ -281,10 +307,9 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean; chipBudget: num
   const { row, isHead, chipBudget } = props
   const meta = row.meta
   const kind = meta?.kind ?? 'turn-start'
-  const turn = meta?.turn
   const fullDate = new Date(row.ct * 1000).toLocaleString()
 
-  // Right-aligned side indicators: relative time + `` id badge on the same line
+  // Right-aligned side indicators: relative time + commit id badge.
   const sideElements = createElement('div', { className: ROW_SIDE },
     createElement('span', { className: 'dsh-history-time', title: fullDate }, timeOf(row.ct)),
     createElement('code', { className: SHA_BADGE }, row.sha.slice(0, 7)),
@@ -324,7 +349,40 @@ function RowContentNode(props: { row: GraphRow; isHead: boolean; chipBudget: num
     )
   }
 
-  // 2. Single-line for manual / rewind
+  // 2. Context Curation: special orange marker + muted orange TURN chips.
+  if (kind === 'refine') {
+    const labels = (meta?.maskedTurns ?? []).map((id) => `- TURN ${id}`)
+    // Reserve label width + gap; the rest uses the same measured chip fitting
+    // policy as changed-file names.
+    const { shown, hidden } = fitLabelChips(labels, Math.max(0, chipBudget - 126))
+    return createElement('div', { className: ROW_CONTENT },
+      createElement('div', { className: ROW_MAIN },
+        createElement('div', { className: `${SINGLE_LINE} ${FILE_LIST}` },
+          createElement('span', { className: 'dsh-badge dsh-badge-curation' }, 'CONTEXT CURATION'),
+          labels.length > 0
+            ? createElement('div', { className: FILE_CLIP },
+                shown.map((label) =>
+                  createElement('code', {
+                    className: CURATION_TURN_CHIP,
+                    title: `${label} hidden from the curated context`,
+                    key: label,
+                  }, label),
+                ),
+                hidden > 0
+                  ? createElement('code', {
+                      className: `${CURATION_TURN_CHIP} is-more`,
+                      title: labels.slice(shown.length).join('\n'),
+                    }, `…${hidden}`)
+                  : null,
+              )
+            : null,
+        ),
+      ),
+      sideElements,
+    )
+  }
+
+  // 3. Single-line for manual / rewind.
   if (kind === 'manual' || kind === 'rewind') {
     const badge = kind === 'manual'
       ? createElement('span', { className: 'dsh-badge dsh-badge-manual' }, '手动快照')
@@ -488,7 +546,8 @@ function GraphOverlay(props: {
   visibleRows: GraphRow[]
   lanes: number
   colors: string[]
-  headLanes: number[]
+  /** Shas on the active tip's ancestor road (lane ids may be reused by other roots). */
+  headRoad: Set<string>
   headSha: string | null
   hoverSha: string | null
   /** Shas NEWER than HEAD ("future" children past the current position). */
@@ -501,7 +560,7 @@ function GraphOverlay(props: {
   height: number
 }): ReactNode {
   const {
-    index, visibleRows, lanes, colors, headLanes, headSha, hoverSha,
+    index, visibleRows, lanes, colors, headRoad, headSha, hoverSha,
     futureSet, hoverPath, geom, height,
   } = props
 
@@ -514,7 +573,6 @@ function GraphOverlay(props: {
   // "Beyond HEAD": a rail whose child is NEWER than the current position draws
   // in a blue-grey between the brand blue and the rail grey.
   const AFTER_HEAD = '#7086ab'
-  const onHead = (lane: number): boolean => headLanes.includes(lane)
   const hovering = hoverPath !== null
 
   /** Node centre Y of a row, or null when it is not painted. */
@@ -592,12 +650,13 @@ function GraphOverlay(props: {
     const endY = parentY === null ? y1 : y1 + stopFor(parentSha)
 
     const onPathEdge = hovering && hoverPath.has(childSha) && hoverPath.has(parentSha)
+    const onHeadEdge = headRoad.has(childSha) && headRoad.has(parentSha)
     const stroke = onPathEdge
       ? HOVER
       : hovering ? grey
       : futureSet.has(childSha) ? AFTER_HEAD
-      : (onHead(childLane) ? colors[childLane % colors.length]! : grey)
-    const opacity = onPathEdge ? 1 : hovering ? 0.45 : (onHead(childLane) ? 0.85 : 0.6)
+      : (onHeadEdge ? colors[childLane % colors.length]! : grey)
+    const opacity = onPathEdge ? 1 : hovering ? 0.45 : (onHeadEdge ? 0.85 : 0.6)
 
     let d: string
     if (parentY === null) {
@@ -687,7 +746,7 @@ function GraphOverlay(props: {
       : hovering ? grey
       : isHead ? colors[row.lane % colors.length]!
       : futureSet.has(row.sha) ? AFTER_HEAD
-      : (onHead(row.lane) ? colors[row.lane % colors.length]! : grey)
+      : (row.isHeadRoad ? colors[row.lane % colors.length]! : grey)
     const cx = laneX(row.lane)
     // Radius comes from the SAME scale function the rail trim uses, so a node and
     // the gap around it can never drift apart at any hover state.
@@ -740,17 +799,38 @@ function HistoryRow(props: {
   anchor: boolean
   /** Horizontal space the chip line may use, in px. */
   chipBudget: number
+  /** True when clicking this row may toggle one TURN in selection mode. */
+  curationSelectable: boolean
+  /** Context Curation selection mode is active. */
+  selectionMode: boolean
+  /** True when this TURN will be excluded from the curated context. */
+  hidden: boolean
+  /** Toggle this TURN's visibility in the curated context. */
+  onVisibilityToggle: (turn: number) => void
 }) {
-  const { row, lanes, isHead, isSelected, onHover, onSelect, anchor, chipBudget } = props
+  const {
+    row, lanes, isHead, isSelected, onHover, onSelect, anchor, chipBudget,
+    curationSelectable, selectionMode, hidden, onVisibilityToggle,
+  } = props
   const estimatedHeight = rowHeightOf(row)
+  const turnId = row.meta?.turn
   return createElement('div', {
-    className: `${ROW} ${isSelected ? 'is-selected' : ''}`,
+    className: `${ROW} ${isSelected ? 'is-selected' : ''}${hidden ? ' is-masked' : ''}${selectionMode ? ' is-curation-selecting' : ''}${curationSelectable ? ' is-curation-selectable' : ''}`,
     style: { minHeight: estimatedHeight },
     'data-sha': row.sha,
     ...(anchor ? { 'data-anchor': row.sha } : {}),
     onMouseEnter: () => onHover(row.sha),
     onMouseLeave: () => onHover(null),
-    onClick: () => onSelect(row),
+    onClick: (event: { stopPropagation: () => void }) => {
+      // Every unclaimed click now closes History. Timeline cards are explicit
+      // action surfaces, so claim the event before selecting or curating.
+      event.stopPropagation()
+      if (selectionMode) {
+        if (curationSelectable && typeof turnId === 'number') onVisibilityToggle(turnId)
+        return
+      }
+      onSelect(row)
+    },
   },
     createElement('div', {
       className: GRAPH_GUTTER,
@@ -776,6 +856,10 @@ function HistoryPanel(props: {
   /** Current client projection of the Agent running bit (authoritative live feed). */
   isSessionRunning: () => boolean | undefined
   rebind: (sessionId: string) => Promise<string>
+  /** Select a newly published independent Context Curation Session. */
+  openDerivedSession: (sessionId: string) => Promise<void>
+  /** Close History after the new Session becomes current. */
+  onDerivedCreated: () => void
   /** Close the panel (immediately on a confirmed rewind). */
   onRewound: () => void
   /** Reopen the panel with an error notice (rewind failed after immediate close). */
@@ -786,8 +870,10 @@ function HistoryPanel(props: {
   /** Render the confirm dialog into the plugin's own root container so the
    *  panel card can be hidden while the dialog is open. */
   portalTo: HTMLElement
-  /** True while the rewind confirm dialog is open (panel card hides for it). */
+  /** True while a modal dialog is open (panel card hides for it). */
   onDialogOpen: (open: boolean) => void
+  /** Selection mode stays visible but owns Escape before the panel shell. */
+  onSelectionModeChange: (open: boolean) => void
   /** Report graph lanes back to the shell for card-only optical centering */
   onLanesChange?: (lanes: number) => void
   /** Consumed at mount: show a pending failure notice from a rewind that
@@ -796,14 +882,22 @@ function HistoryPanel(props: {
   onInitialNoticeConsumed?: () => void
 }) {
   const {
-    sessionId, isSessionRunning, rebind, onRewound, onRewindFailed, onProgress, portalTo,
-    onDialogOpen, onLanesChange, initialNotice, onInitialNoticeConsumed,
+    sessionId, isSessionRunning, rebind, openDerivedSession, onDerivedCreated,
+    onRewound, onRewindFailed, onProgress, portalTo,
+    onDialogOpen, onSelectionModeChange, onLanesChange, initialNotice, onInitialNoticeConsumed,
   } = props
   const [rows, setRows] = useState<TimelineRow[] | null | undefined>(undefined)
   const [head, setHead] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [selected, setSelected] = useState<TimelineRow | null>(null)
-  const [rewindGuardNotice, setRewindGuardNotice] = useState<string | null>(null)
+  /** TURN numbers excluded from the curated context. */
+  const [maskedTurns, setMaskedTurns] = useState<Set<number>>(new Set())
+  /** Current-road-only card selection mode entered through the panel action. */
+  const [selectionMode, setSelectionMode] = useState(false)
+  /** True while the Context Curation confirm dialog is open. */
+  const [refineOpen, setRefineOpen] = useState(false)
+  /** Running-session guard dialog: title + text (rewind vs refine wording). */
+  const [guardNotice, setGuardNotice] = useState<{ title: string; text: string } | null>(null)
   const selectionGuardRun = useRef(0)
   const [notice, setNotice] = useState<string>(initialNotice ?? '')
   const [errorLog, setErrorLog] = useState<string | null>(null)
@@ -816,24 +910,41 @@ function HistoryPanel(props: {
     onInitialNoticeConsumed?.()
   }, [initialNotice, onInitialNoticeConsumed])
 
-  // While the rewind dialog is open, the shell hides the panel card; report the
-  // open/close transition so the shell can re-show it on cancel.
-  const dialogOpen = selected !== null || rewindGuardNotice !== null
+  // While the rewind/refine dialog is open, the shell hides the panel card;
+  // report the open/close transition so the shell can re-show it on cancel.
+  const dialogOpen = selected !== null || refineOpen || guardNotice !== null
   useEffect(() => {
     onDialogOpen(dialogOpen)
   }, [dialogOpen, onDialogOpen])
+  useEffect(() => {
+    onSelectionModeChange(selectionMode)
+  }, [selectionMode, onSelectionModeChange])
+  useEffect(() => () => onSelectionModeChange(false), [onSelectionModeChange])
   // Escape cancels the dialog first (the shell's Escape handler skips while the
   // dialog is open — otherwise it would close the whole panel).
   useEffect(() => {
     if (!dialogOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      if (rewindGuardNotice !== null) setRewindGuardNotice(null)
+      if (guardNotice !== null) setGuardNotice(null)
+      else if (refineOpen) setRefineOpen(false)
       else setSelected(null)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [dialogOpen, rewindGuardNotice])
+  }, [dialogOpen, guardNotice, refineOpen])
+  // Outside a dialog, Escape exits Context Curation selection without closing
+  // the History panel. The shell is informed through onSelectionModeChange.
+  useEffect(() => {
+    if (!selectionMode || dialogOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setSelectionMode(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectionMode, dialogOpen])
   /** Row currently hovered (sha), for ancestor-path highlight. */
   const [hoverSha, setHoverSha] = useState<string | null>(null)
   /** Live geometry of the painted rows, feeding the single graph overlay: each
@@ -906,11 +1017,11 @@ function HistoryPanel(props: {
     const projectedRunning = isSessionRunning()
     if (projectedRunning === true) {
       setSelected(null)
-      setRewindGuardNotice('当前会话正在执行任务。请等待任务结束，或先终止任务后再次尝试。')
+      setGuardNotice({ title: '暂时无法回档', text: '当前会话正在执行任务。请等待任务结束，或先终止任务后再次尝试。' })
       return
     }
     if (projectedRunning === false) {
-      setRewindGuardNotice(null)
+      setGuardNotice(null)
       setSelected(target)
       return
     }
@@ -923,14 +1034,108 @@ function HistoryPanel(props: {
     if (run !== selectionGuardRun.current) return
     if (status.ok && status.running) {
       setSelected(null)
-      setRewindGuardNotice('当前会话正在执行任务。请等待任务结束，或先终止任务后再次尝试。')
+      setGuardNotice({ title: '暂时无法回档', text: '当前会话正在执行任务。请等待任务结束，或先终止任务后再次尝试。' })
       return
     }
-    setRewindGuardNotice(null)
+    setGuardNotice(null)
     setSelected(target)
   }
 
-  const graph = useMemo(() => (rows === undefined || rows === null ? null : buildGraph(rows, head)), [rows, head])
+  // ---- Context Curation (hide TURNs from the model context) ----
+
+  /** Reset the mask selection whenever the panel switches sessions. */
+  useEffect(() => {
+    setMaskedTurns(new Set())
+    setSelectionMode(false)
+  }, [sessionId])
+
+  const enterSelectionMode = (): void => {
+    setSelected(null)
+    setHoverSha(null)
+    setSelectionMode(true)
+  }
+
+  const exitSelectionMode = (): void => {
+    setHoverSha(null)
+    setSelectionMode(false)
+  }
+
+  const toggleMask = (turn: number): void => {
+    setMaskedTurns((current) => {
+      const next = new Set(current)
+      if (next.has(turn)) next.delete(turn)
+      else next.add(turn)
+      return next
+    })
+  }
+
+  const openRefine = (): void => {
+    if (maskedTurns.size === 0) return
+    const projectedRunning = isSessionRunning()
+    if (projectedRunning === true) {
+      setGuardNotice({ title: 'CONTEXT CURATION UNAVAILABLE', text: '当前会话正在执行任务。请等待任务结束，或先终止任务后再次尝试。' })
+      return
+    }
+    setRefineOpen(true)
+  }
+
+  const doRefine = async (): Promise<void> => {
+    if (maskedTurns.size === 0) return
+    const turns = Array.from(maskedTurns).sort((a, b) => a - b)
+    setRefineOpen(false)
+    setSelectionMode(false)
+    setBusy(true)
+    setNotice('')
+    const result = await refineSession(sessionId, turns)
+    if (!result.ok) {
+      setBusy(false)
+      const reason = result.reason ?? 'unknown'
+      const unmapped = result.unmapped !== undefined && result.unmapped.length > 0
+        ? `（以下 TURN 未找到：${result.unmapped.join(', ')}）`
+        : ''
+      setNotice(`Context Curation 失败：${reason}${result.error !== undefined ? `（${result.error}）` : ''}${unmapped}`)
+      return
+    }
+    if (result.newSessionId === undefined) {
+      setBusy(false)
+      setNotice('Context Curation 失败：Host 未返回新会话 ID')
+      return
+    }
+    const masked = result.maskedTurns?.length ?? turns.length
+    try {
+      await openDerivedSession(result.newSessionId)
+    } catch (error) {
+      setBusy(false)
+      setNotice(
+        `新会话已创建（${result.newSessionId}），但客户端无法自动打开：${error instanceof Error ? error.message : String(error)}`,
+      )
+      return
+    }
+    setMaskedTurns(new Set())
+    setBusy(false)
+    // The source panel closes; the standard Session UI now owns the independent
+    // derived Session and its future conversation/workspace snapshots.
+    onDerivedCreated()
+    if (result.warning !== undefined) {
+      // The new Session is already current. Keep non-fatal details in the console
+      // instead of reopening the source History panel over the new conversation.
+      console.warn(`[dsh-history-rewind] Context Curation created ${result.newSessionId}; hidden ${masked} TURN(s): ${result.warning}`)
+    }
+  }
+
+  // Selection mode removes every off-road row before layout, so the graph is
+  // the current active branch only (a single ancestor chain / single lane).
+  const graphRows = useMemo(() => {
+    if (rows === undefined || rows === null || !selectionMode || head === null) return rows
+    const currentRoad = roadSet(rows, head)
+    if (currentRoad.size === 0) return rows
+    return rows.filter((row) => currentRoad.has(row.sha))
+  }, [rows, head, selectionMode])
+
+  const graph = useMemo(
+    () => (graphRows === undefined || graphRows === null ? null : buildGraph(graphRows, head)),
+    [graphRows, head],
+  )
   const headSha = head
 
   useEffect(() => {
@@ -942,6 +1147,12 @@ function HistoryPanel(props: {
   /** Topology index for the graph overlay: rebuilt only when the graph itself
    *  changes, so hover/scroll re-renders never re-walk the commit list. */
   const graphIndex = useMemo(() => (graph === null ? null : buildGraphIndex(graph.rows)), [graph])
+  const headRoadSet = useMemo(() => {
+    const set = new Set<string>()
+    if (graph === null) return set
+    for (const row of graph.rows) if (row.isHeadRoad) set.add(row.sha)
+    return set
+  }, [graph])
 
   // HEAD-relative ordering: rows after HEAD's row (oldest-first) are the
   // "future" children. The set drives rail colour by ENDPOINT (like the hover
@@ -1125,9 +1336,9 @@ function HistoryPanel(props: {
   // Ancestor path of the hovered row (itself + all parents up to the root):
   // every node and rail on this path highlights blue during hover.
   const hoverPath = useMemo(() => {
-    if (hoverSha === null || rows === undefined || rows === null) return null
-    return roadSet(rows, hoverSha)
-  }, [hoverSha, rows])
+    if (hoverSha === null || graphRows === undefined || graphRows === null) return null
+    return roadSet(graphRows, hoverSha)
+  }, [hoverSha, graphRows])
 
   const doRewind = async (withWorkspace: boolean): Promise<void> => {
     if (selected === null) return
@@ -1401,7 +1612,10 @@ function HistoryPanel(props: {
             width: '100%',
             maxWidth: 180,
           },
-          onClick: () => void doSnapshot(),
+          onClick: (event: { stopPropagation: () => void }) => {
+            event.stopPropagation()
+            void doSnapshot()
+          },
         },
           busy
             ? createElement('span', {
@@ -1444,7 +1658,21 @@ function HistoryPanel(props: {
   // HEAD-relative ordering is computed at the top (see the hook block near
   // `graph`); nothing hook-related lives after the early returns.
 
-  return createElement('div', { className: PANEL },
+  return createElement('div', { className: `${PANEL}${selectionMode ? ' is-curation-selection' : ''}` },
+    selectionMode
+      ? createElement('button', {
+          type: 'button',
+          className: SELECTION_CLOSE,
+          title: 'Exit Context Curation selection (Esc)',
+          'aria-label': 'Exit Context Curation selection',
+          onClick: (event: { stopPropagation: () => void }) => {
+            event.stopPropagation()
+            exitSelectionMode()
+          },
+        },
+          createElement(X, { size: 16, strokeWidth: 1.9, 'aria-hidden': true }),
+        )
+      : null,
     // Scrollable Flat Timeline List (Trajectory style), windowed ±20 around HEAD
     createElement('div', {
       className: `${MODAL_BODY}${scrolling ? ' is-scrolling' : ''}${nearBar ? ' is-near-bar' : ''}`,
@@ -1465,12 +1693,16 @@ function HistoryPanel(props: {
             lanes: graph!.lanes,
             isHead: row.sha === headSha,
             isSelected: selected?.sha === row.sha,
-            // Card inner width minus the graph gutter, the card's own padding
-            // and the right-hand time + sha column.
+            // Card inner width minus graph gutter, card padding, and side metadata.
             chipBudget: Math.max(120, (listWidth > 0 ? listWidth : 820) - graph!.lanes * LANE_W - 8 - 32 - 150),
             onHover,
             onSelect: (target) => { void selectRewindTarget(target) },
             anchor: row.sha === headSha,
+            curationSelectable: (row.meta?.kind === 'turn-end' || row.meta?.kind === 'turn-start')
+              && typeof row.meta?.turn === 'number',
+            selectionMode,
+            hidden: row.meta?.turn !== undefined && maskedTurns.has(row.meta.turn),
+            onVisibilityToggle: (turn) => toggleMask(turn),
           }),
         ),
         graph !== null && laid !== null && graphIndex !== null
@@ -1479,7 +1711,7 @@ function HistoryPanel(props: {
               visibleRows: laid,
               lanes: graph.lanes,
               colors: RAIL_COLORS,
-              headLanes: graph.headLanes,
+              headRoad: headRoadSet,
               headSha,
               hoverSha,
               futureSet,
@@ -1491,9 +1723,30 @@ function HistoryPanel(props: {
       ),
     ),
 
+    // One right-aligned DSH-style action replaces the per-card eye controls.
+    // Normal mode enters selection; selection mode advances to confirmation.
+    createElement('div', { className: `${ACTION_DOCK} is-curation` },
+      createElement('button', {
+        type: 'button',
+        className: `${BUTTON} outline`,
+        disabled: busy || (selectionMode && maskedTurns.size === 0),
+        title: selectionMode
+          ? `Create an independent Session without ${maskedTurns.size} hidden TURN${maskedTurns.size === 1 ? '' : 's'}`
+          : 'Choose TURNs for a curated Session',
+        onClick: (event: { stopPropagation: () => void }) => {
+          event.stopPropagation()
+          if (selectionMode) openRefine()
+          else enterSelectionMode()
+        },
+      },
+        createElement(ListFilter, { size: 15, strokeWidth: 1.8, 'aria-hidden': true }),
+        busy ? 'CREATING…' : selectionMode ? 'CREATE CURATED SESSION' : 'CURATED SESSION',
+      ),
+    ),
+
     // Running-session safety notice. The timeline card never reaches the rewind
     // confirmation while its agent is still executing a task.
-    rewindGuardNotice !== null
+    guardNotice !== null
       ? createPortal(
           createElement('div', {
             className: MODAL_BACKDROP,
@@ -1505,7 +1758,7 @@ function HistoryPanel(props: {
               background: 'transparent',
               backdropFilter: 'none',
             },
-            onClick: () => setRewindGuardNotice(null),
+            onClick: () => setGuardNotice(null),
           },
             createElement('div', {
               className: DIALOG,
@@ -1513,20 +1766,20 @@ function HistoryPanel(props: {
               onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
             },
               createElement('div', { className: DIALOG_HEAD },
-                createElement('h2', { className: DIALOG_TITLE }, '暂时无法回档'),
+                createElement('h2', { className: DIALOG_TITLE }, guardNotice.title),
                 createElement('button', {
                   type: 'button',
                   className: DIALOG_CLOSE,
                   title: '关闭',
-                  onClick: () => setRewindGuardNotice(null),
+                  onClick: () => setGuardNotice(null),
                 }, '✕'),
               ),
-              createElement('p', { className: DIALOG_DESCRIPTION }, rewindGuardNotice),
+              createElement('p', { className: DIALOG_DESCRIPTION }, guardNotice.text),
               createElement('div', { className: DIALOG_FOOT },
                 createElement('button', {
                   type: 'button',
                   className: `${BUTTON} outline`,
-                  onClick: () => setRewindGuardNotice(null),
+                  onClick: () => setGuardNotice(null),
                   style: { minWidth: 80 },
                 }, '确定'),
               ),
@@ -1598,6 +1851,58 @@ function HistoryPanel(props: {
                   title: '回退会话消息并同步恢复配对的工作区文件',
                   onClick: () => void doRewind(true),
                 }, busy ? '处理中…' : '会话和工作区'),
+              ),
+            ),
+          ),
+          portalTo,
+        )
+      : null,
+
+    // Context Curation confirmation — portaled like rewind so the panel card
+    // hides while the experimental-risk dialog is in focus.
+    refineOpen
+      ? createPortal(
+          createElement('div', {
+            className: MODAL_BACKDROP,
+            style: {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 10001,
+              padding: 16,
+              background: 'transparent',
+              backdropFilter: 'none',
+            },
+            onClick: () => setRefineOpen(false),
+          },
+            createElement('div', {
+              className: DIALOG,
+              style: { margin: 0, animation: 'dshSlideUp 0.15s ease-out' },
+              onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+            },
+              createElement('div', { className: DIALOG_HEAD },
+                createElement('h2', { className: DIALOG_TITLE }, 'CONTEXT CURATION'),
+                createElement('button', {
+                  className: DIALOG_CLOSE,
+                  title: '关闭',
+                  onClick: () => setRefineOpen(false),
+                }, '✕'),
+              ),
+              createElement('p', { className: DIALOG_DESCRIPTION },
+                '将创建一个独立的新会话，并从其模型上下文中隐藏 ',
+                createElement('strong', null, `${maskedTurns.size} 个 TURN`),
+                '。当前会话及其历史记录不会被修改。',
+              ),
+              createElement('div', { className: DIALOG_FOOT },
+                createElement('button', {
+                  className: `${BUTTON} outline`,
+                  disabled: busy,
+                  onClick: () => setRefineOpen(false),
+                }, '取消'),
+                createElement('button', {
+                  className: `${BUTTON} outline`,
+                  disabled: busy,
+                  onClick: () => { void doRefine() },
+                }, busy ? '处理中…' : '确定'),
               ),
             ),
           ),
@@ -2556,9 +2861,9 @@ export function apply(ctx: Context): void {
       return () => { listeners.delete(listener) }
     }, [])
     useEffect(() => svc.list.subscribe(() => force((v) => v + 1)), [])
-    // The rewind confirm dialog open state: the panel card hides while the
-    // dialog floats over the page (cancel restores the timeline untouched).
+    // Dialogs hide the panel; selection mode keeps it visible but owns Escape.
     const [dialogOpen, setDialogOpen] = useState(false)
+    const [selectionModeOpen, setSelectionModeOpen] = useState(false)
     // Rewind progress: an opaque mask + centered status card from confirm until
     // the conversation view has refreshed in place. The mask hides everything
     // while the host rewinds — including the platform's brief no-session hero
@@ -2583,21 +2888,23 @@ export function apply(ctx: Context): void {
       const card = cardRef.current
       card?.focus()
       const onKeyDown = (event: KeyboardEvent): void => {
-        if (event.key === 'Escape' && !dialogOpen) setOpen(false)
+        if (event.key === 'Escape' && !dialogOpen && !selectionModeOpen) setOpen(false)
       }
       window.addEventListener('keydown', onKeyDown)
       return () => window.removeEventListener('keydown', onKeyDown)
-    }, [open, dialogOpen])
+    }, [open, dialogOpen, selectionModeOpen])
 
-    /** Full rect of the conversation viewport: centers the card horizontally AND
-     *  confines the blur to the chat area so the sidebar stays crisp. */
+    // Full conversation viewport rect, used to center the card and confine blur.
     const [sessionBounds, setSessionBounds] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
-    /** Active lanes count in the graph, used to compute exact graph gutter width
-     *  and offset the history container so the card body (excluding git graph)
-     *  is centered on the conversation center. */
+    // Active graph lanes determine the card-only optical centering offset.
     const [activeLanes, setActiveLanes] = useState<number>(1)
+    // Offset the card by half of its one-sided graph gutter.
+    const cardOpticalOffset = (graphWidth(activeLanes) + 12) / 2
+    const cardTransform = cardOpticalOffset >= 0
+      ? `translateX(calc(-50% - ${cardOpticalOffset}px))`
+      : `translateX(calc(-50% + ${Math.abs(cardOpticalOffset)}px))`
 
-    // Track the session chat area geometry. Re-measured on resize and while the
+    // Track the session chat area geometry.
     // layout settles (the sidebar can collapse/expand), so the blur keeps
     // covering exactly the conversation and nothing else.
     //
@@ -2698,19 +3005,31 @@ export function apply(ctx: Context): void {
               ...(sessionBounds !== null ? {
                 position: 'fixed',
                 left: `${sessionBounds.left + sessionBounds.width / 2}px`,
-                // Shift left by exactly half of the graph gutter (graphWidth + row gap)
-                // so the card content (excluding git graph) is perfectly centered on A (conversation center).
-                transform: `translateX(calc(-50% - ${(graphWidth(activeLanes) + 12) / 2}px))`,
+                // Center the actual card while accounting for the graph gutter.
+                transform: cardTransform,
                 width: `min(860px, ${Math.max(300, sessionBounds.width - 48)}px)`,
               } : {}),
               ...(dialogOpen ? { display: 'none' } : {}),
             },
-            onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
           },
+            !selectionModeOpen
+              ? createElement('button', {
+                  type: 'button',
+                  className: SELECTION_CLOSE,
+                  title: '关闭 History',
+                  'aria-label': '关闭 History',
+                  onClick: (event: { stopPropagation: () => void }) => {
+                    event.stopPropagation()
+                    setOpen(false)
+                  },
+                }, createElement(X, { size: 16, strokeWidth: 1.9, 'aria-hidden': true }))
+              : null,
             createElement(HistoryPanel, {
               sessionId,
               isSessionRunning: () => svc.list.getSnapshot().byId?.[sessionId]?.running,
               rebind: (id) => rebindView(svc, id),
+              openDerivedSession: (id) => openPublishedSession(svc, id),
+              onDerivedCreated: () => setOpen(false),
               onRewound: () => setOpen(false),
               onRewindFailed: (text) => {
                 pendingRewindNotice = text
@@ -2719,6 +3038,7 @@ export function apply(ctx: Context): void {
               onProgress: (phase, sha) => setProgress({ phase, sha, fading: false }),
               portalTo: host,
               onDialogOpen: setDialogOpen,
+              onSelectionModeChange: setSelectionModeOpen,
               onLanesChange: setActiveLanes,
               initialNotice: pendingRewindNotice ?? undefined,
               onInitialNoticeConsumed: () => { pendingRewindNotice = null },

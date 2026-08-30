@@ -17,7 +17,8 @@
 
 import { readdir, lstat, cp, unlink, rmdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join, sep, basename, relative, resolve } from 'node:path'
+import { join, sep, relative, resolve } from 'node:path'
+import ignore from 'ignore'
 import type { SubprocessLike } from './git-runner.ts'
 import type { WorkspaceChange } from './messages.ts'
 import { runGit, firstLine } from './git-runner.ts'
@@ -74,56 +75,39 @@ function signatureOf(files: readonly WalkFile[], excludes: readonly string[]): s
   return sig
 }
 
-/** Compiled exclude rule. */
-interface ExcludeRule {
-  regex: RegExp
-  dirOnly: boolean
-  anchored: boolean
-}
-
 /** Default exclude patterns (never filtered out of the walk). */
 const GIT_DIR_NAME = '.git'
 
-/** Glob-to-regex for basename patterns (`*`, `?` supported). */
-function globToRegex(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
-  return new RegExp(`^${escaped}$`)
-}
-
 /**
- * Compile exclude patterns into a matcher. Patterns without `/` match the
- * basename at any depth; a leading `/` anchors to the root level; a trailing
- * `/` matches directories only.
- * @param patterns - raw patterns ("#..." comments and blanks pre-filtered).
- * @returns a matcher over (rel, isDir).
+ * Compile root `.gitignore` lines into a Git-compatible path matcher.
+ *
+ * The previous matcher compared every rule with `basename(rel)`, so any rule
+ * containing a path separator (for example `/src-tauri/target/`) could never
+ * match a nested path, and recursive `.rs.bk` globstar rules were ineffective.
+ * `ignore` implements Git's ordered rule semantics over the complete relative
+ * path: root anchoring, directory-only rules, `**`, character globs, escaped
+ * comment/negation prefixes, and `!` re-inclusion.
+ *
+ * @param patterns - raw `.gitignore` rule lines in source order.
+ * @returns a matcher over workspace-relative paths and their file type.
  */
 export function compileExcludes(patterns: readonly string[]): (rel: string, isDir: boolean) => boolean {
-  const rules: ExcludeRule[] = []
-  for (const raw of patterns) {
-    if (raw.length === 0) continue
-    let pattern = raw
-    let dirOnly = false
-    if (pattern.endsWith('/')) {
-      dirOnly = true
-      pattern = pattern.slice(0, -1)
-    }
-    let anchored = false
-    if (pattern.startsWith('/')) {
-      anchored = true
-      pattern = pattern.slice(1)
-    }
-    if (pattern.length === 0) continue
-    rules.push({ regex: globToRegex(pattern), dirOnly, anchored })
-  }
+  // Git follows the filesystem's case behavior in the environments this plugin
+  // supports: Windows workspaces are case-insensitive; POSIX workspaces are not.
+  const rules = ignore({ ignoreCase: process.platform === 'win32' }).add(patterns)
   return (rel, isDir) => {
-    const name = basename(rel)
-    const isRoot = !rel.includes('/')
-    for (const rule of rules) {
-      if (rule.dirOnly && !isDir) continue
-      if (rule.anchored && !isRoot) continue
-      if (rule.regex.test(name)) return true
-    }
-    return false
+    // walkFiles already produces POSIX separators. backupWorkspace feeds a
+    // native path.relative() result, whose separators need conversion only on
+    // Windows (a backslash is a legal filename character on POSIX).
+    const normalized = sep === '\\' ? rel.replace(/\\/g, '/') : rel
+    const invalid = normalized.length === 0
+      || normalized.startsWith('/')
+      || normalized === '.'
+      || normalized.startsWith('./')
+      || normalized.split('/').includes('..')
+    if (invalid) throw new Error(`workspace exclude matcher requires a root-relative path: ${rel}`)
+    const candidate = isDir ? `${normalized.replace(/\/+$/, '')}/` : normalized
+    return rules.ignores(candidate)
   }
 }
 
@@ -145,11 +129,14 @@ async function walkFiles(rootDir: string, matcher: (rel: string, isDir: boolean)
     const entries = await readdir(absDir, { withFileTypes: true })
     for (const entry of entries) {
       const name = entry.name
+      // Git metadata is never workspace content. This covers ordinary `.git`
+      // directories, linked-worktree `.git` files, and symlinks before user
+      // negation rules could attempt to re-include them.
+      if (name === GIT_DIR_NAME) continue
       const rel = relDir.length === 0 ? name : `${relDir}/${name}`
       const isRootGitignore = relDir.length === 0 && name === GITIGNORE_NAME
       if (!isRootGitignore && matcher(rel, entry.isDirectory())) continue
       if (entry.isDirectory()) {
-        if (name === GIT_DIR_NAME) continue
         await walk(join(absDir, name), rel)
       } else if (entry.isSymbolicLink()) {
         // Symlinks are recorded as regular files with the link target's mode
@@ -223,7 +210,16 @@ export async function snapshotWorkspace(
     // that way the freshly-written file both supplies this snapshot's exclude
     // rules and is itself picked up by the walk that follows.
     await ensureWorkspaceGitignore(root, cwd)
-    const excludes = await readExcludes(cwd)
+    let excludes: string[]
+    try {
+      excludes = await readExcludes(cwd)
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'gitignore-read-failed',
+        detail: error instanceof Error ? error.message : String(error),
+      }
+    }
     const matcher = compileExcludes(excludes)
     const files = await walkFiles(cwd, matcher)
     const repo: ShadowRepo = { gitDir: repoDir }

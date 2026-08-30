@@ -33,6 +33,7 @@ import { getJumpTarget } from './state.ts'
 import {
   rewindSession, type AgentRegistryLike, type AgentPresetsLike, type SessionsServiceLike,
 } from './rewind.ts'
+import { refineSession, type SessionControllerLike } from './refine.ts'
 import { timelineRows } from './timeline.ts'
 import { purgeSession } from './purge.ts'
 import { exportShadowRepo } from './export-repo.ts'
@@ -102,6 +103,7 @@ interface Engine {
   sessions: SessionsServiceLike | undefined
   persistence: PersistenceLike | undefined
   agents: AgentRegistryLike | undefined
+  sessionController: SessionControllerLike | undefined
   agentPresets?: AgentPresetsLike | undefined
   root: string
 }
@@ -349,6 +351,31 @@ function buildHandler(engine: Engine, gate: SessionGate): (req: IncomingMessage,
         return
       }
 
+      // POST /refine — create a NEW independent ordinary Session from the
+      // selected native event history. The source Session and its workspace are
+      // never detached, replaced, rewound, or snapshotted by this operation.
+      if (pathname === `${ROUTE_PREFIX}/refine`) {
+        const turns = Array.isArray(args.turns)
+          ? (args.turns.filter((turn) => typeof turn === 'number' && Number.isFinite(turn) && Number.isSafeInteger(turn)) as number[])
+          : []
+        if (turns.length === 0) {
+          json(res, 400, { ok: false, reason: 'bad-args' })
+          return
+        }
+        const result = await gate.run(sessionId, () => refineSession(
+          engine.subprocess,
+          engine.root,
+          engine.sessions,
+          engine.persistence,
+          engine.agents,
+          engine.sessionController,
+          sessionId,
+          turns,
+        ))
+        json(res, 200, result)
+        return
+      }
+
       // POST /rewind — { sessionId, commit, restoreWorkspace, workspaceOnly }.
       if (pathname === `${ROUTE_PREFIX}/rewind`) {
         const commit = typeof args.commit === 'string' ? args.commit : ''
@@ -474,7 +501,7 @@ async function bodySessionId(req: IncomingMessage): Promise<string | null> {
 /**
  * Register the snapshot listeners + routes.
  * @param ctx - Host context whose subprocess, sessions, sessionPersistence,
- *   agents and webServer services are consumed.
+ *   sessionController, agents and webServer services are consumed.
  */
 export function apply(ctx: Context): void {
   const subprocess = ctx.get('subprocess') as SubprocessLike | undefined
@@ -485,13 +512,14 @@ export function apply(ctx: Context): void {
   if (persistence === undefined) return
   const agents = ctx.get('agents') as AgentRegistryLike | undefined
   const agentPresets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+  const sessionController = ctx.get('sessionController') as SessionControllerLike | undefined
   const root = historyRoot()
   // The root doubles as git cwd for repo-only commands: it must exist before
   // the first git call, or Node fails the spawn with ENOENT.
   mkdirSync(root, { recursive: true })
   void ensureHistoryRoot(root)
 
-  const engine: Engine = { subprocess, sessions, persistence, agents, agentPresets, root }
+  const engine: Engine = { subprocess, sessions, persistence, agents, sessionController, agentPresets, root }
   const gate = new SessionGate()
 
   // Snapshot on every turn boundary. The snapshot runs behind the firehose:

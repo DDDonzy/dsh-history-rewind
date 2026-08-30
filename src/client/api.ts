@@ -15,7 +15,7 @@ export interface TimelineRow {
   /** A/M/D paths embedded by the session snapshot. */
   files?: WorkspaceChange[]
   meta: {
-    kind: 'turn-start' | 'turn-end' | 'manual' | 'rewind'
+    kind: 'turn-start' | 'turn-end' | 'manual' | 'rewind' | 'refine'
     turn?: number
     phase?: 'start' | 'end'
     seq?: number
@@ -27,6 +27,7 @@ export interface TimelineRow {
     message?: string
     userMessage?: string
     asstMessage?: string
+    maskedTurns?: number[]
     changes?: WorkspaceChange[]
   } | null
 }
@@ -82,6 +83,51 @@ export interface PurgeResult {
   workspaceRefs?: number
   workspacePruned?: boolean
   backupsDeleted?: number
+}
+
+/** Context Curation result. */
+export interface RefineResult {
+  ok: boolean
+  reason?: string
+  /** Source-Session TURN ids omitted from the derived seed. */
+  maskedTurns?: number[]
+  /** Requested turns absent from the artifact (nothing removed for them). */
+  unmapped?: number[]
+  /** Source-Session TURN ids retained in the derived seed. */
+  remainingTurns?: number[]
+  /** Newly published independent ordinary Session. */
+  newSessionId?: string
+  /** Initial Context Curation commit in the new Session's own shadow repo. */
+  curationCommit?: string
+  /** Whether DSH attached the new Session to the inherited Workspace. */
+  workspaceAttached?: boolean
+  workspaceId?: string
+  workspaceAttachmentFailure?: { code: string; workspaceId: string; message: string }
+  error?: string
+  /** Success with a non-fatal publication/snapshot warning. */
+  warning?: string
+}
+
+/** Create an independent Session with the selected TURNs omitted. */
+export async function refineSession(sessionId: string, turns: number[]): Promise<RefineResult> {
+  const data = await post(`${ROUTE_PREFIX}/refine`, { sessionId, turns }, 120000)
+  if (data === null) return { ok: false, reason: 'transport' }
+  return {
+    ok: data.ok === true,
+    ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
+    ...(Array.isArray(data.maskedTurns) ? { maskedTurns: data.maskedTurns as number[] } : {}),
+    ...(Array.isArray(data.unmapped) ? { unmapped: data.unmapped as number[] } : {}),
+    ...(Array.isArray(data.remainingTurns) ? { remainingTurns: data.remainingTurns as number[] } : {}),
+    ...(typeof data.newSessionId === 'string' ? { newSessionId: data.newSessionId } : {}),
+    ...(typeof data.curationCommit === 'string' ? { curationCommit: data.curationCommit } : {}),
+    ...(typeof data.workspaceAttached === 'boolean' ? { workspaceAttached: data.workspaceAttached } : {}),
+    ...(typeof data.workspaceId === 'string' ? { workspaceId: data.workspaceId } : {}),
+    ...(data.workspaceAttachmentFailure !== null && typeof data.workspaceAttachmentFailure === 'object'
+      ? { workspaceAttachmentFailure: data.workspaceAttachmentFailure as { code: string; workspaceId: string; message: string } }
+      : {}),
+    ...(typeof data.error === 'string' ? { error: data.error } : {}),
+    ...(typeof data.warning === 'string' ? { warning: data.warning } : {}),
+  }
 }
 
 /** Shadow-repo export result (debug clone). */

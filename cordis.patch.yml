@@ -2,4 +2,4 @@
 - insert:
     - id: dsh-history-rewind
       name: 'dsh-history-rewind'
-      inject: [subprocess, sessions, webServer, sessionPersistence, agents]
+      inject: [subprocess, sessions, webServer, sessionPersistence, sessionController, agents]

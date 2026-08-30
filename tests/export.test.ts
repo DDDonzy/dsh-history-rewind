@@ -43,7 +43,11 @@ test('export: clone shadow repo to a work-tree repo with local road branches', a
   const snapB = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-end', seq: 5 })
   assert.equal(snapB.ok, true)
 
-  // fork road: jump to A then change → road-<ts> starting at A
+  // fork road: jump to A then change → road-<ts> starting at A.
+  // turn-end: the checkpoint gate skips turn-start pins when the workspace is
+  // unchanged, but the session change must still fork — the gate's comment
+  // says the pre-send checkpoint is noise, so the fork lands on the turn-end
+  // snapshot instead.
   const agents = {
     get: () => ({ status: 'idle' }),
     detachEntered: () => undefined,
@@ -59,7 +63,7 @@ test('export: clone shadow repo to a work-tree repo with local road branches', a
   }
   await rewindSession(subprocess, historyRoot, sessions, persistence, agents, sessionId, snapA.commit!, false)
   await writeFile(official, payloadX)
-  const fork = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-start', seq: 6 })
+  const fork = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-end', seq: 6 })
   assert.equal(fork.fork, true)
 
   // ---- export to an EMPTY target dir ----

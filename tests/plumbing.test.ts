@@ -99,7 +99,11 @@ test('session snapshot: workspace first, session commit carries snap/base/ws, tr
   assert.ok(log.stdout.includes(`[${result.wsCommit}]`))
 
   const blob = await runGit(subprocess, ['git', `--git-dir=${repoDir}`, 'cat-file', 'blob', `main:session-${sessionId}/session.jsonl.zstd`], root)
-  assert.deepEqual(Buffer.from(blob.stdout, 'utf8'), Buffer.from(payload.toString('utf8'), 'utf8'))
+  // turn-start snapshots append one bare EMPTY turn pair (appendEmptyTurn)
+  // so every snapshot is a valid non-blank conversation state; the event-time
+  // bytes must still survive as the blob's byte prefix (append-only).
+  assert.ok(blob.stdout.length > payload.length, 'empty-turn frame appended')
+  assert.ok(blob.stdout.startsWith(payload.toString('utf8')), 'event-time bytes survive as prefix')
 
   const result2 = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-end', seq: 9 })
   assert.equal(result2.ok, true)
@@ -193,12 +197,13 @@ test('rewind (checkout): zero git changes; dedup when unchanged; road fork on ch
   assert.equal(roadTip, next.commit)
 
   // 5. UNDO: jump back to B (the original road tip) — git untouched again;
-  //    changed snapshot forks a SECOND road from B.
+  //    changed snapshot forks a SECOND road from B (turn-end: the checkpoint
+  //    gate skips byte-comparable workspace turn-start pins).
   const undo = await rewindSession(subprocess, historyRoot, sessions, persistence, agents, sessionId, snapB.commit!, false)
   assert.equal(undo.ok, true)
   assert.equal((await readFile(official)).toString('utf8'), 'BBBBBBBB')
   await writeFile(official, Buffer.from('BBBB+Y'))
-  const fork2 = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-start', seq: 15 })
+  const fork2 = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-end', seq: 15 })
   assert.equal(fork2.ok, true)
   assert.equal(fork2.fork, true)
   assert.equal(fork2.base, snapB.commit)
@@ -277,10 +282,13 @@ test('capture-first: event-time blob stays the boundary even when the file advan
   await rm(root, { recursive: true, force: true })
 })
 
-test('turn-start (USER) commits even when byte-identical to the prior ASST (linear path)', async () => {
-  // Regression: a continuous conversation's pre-send USER prefix is byte-equal
-  // to the previous turn's ASST blob. It is still a distinct timeline anchor
-  // and must NOT be deduped away (only turn 1's USER survived before the fix).
+test('turn-start (USER) byte-identical to the prior ASST with no workspace change is skipped (checkpoint gate)', async () => {
+  // The pre-send checkpoint gate (src/snapshot.ts): a turn-start snapshot is
+  // only a node when the WORKSPACE actually changed since the last workspace
+  // snapshot. Unchanged workspace + byte-identical session bytes = a
+  // no-change checkpoint (noise) — nothing is produced, and the base is still
+  // the previous commit. (The byte-level dedup exception that pins a USER
+  // anchor applies when the workspace DID change; the gate wins otherwise.)
   const subprocess = fakeSubprocess()
   const root = await mkdtemp(join(tmpdir(), 'dsh-history-test-'))
   const cwd = join(root, 'ws')
@@ -302,14 +310,13 @@ test('turn-start (USER) commits even when byte-identical to the prior ASST (line
   assert.equal(asst.ok, true)
   assert.ok(asst.commit)
 
-  // turn N+1 USER snapshot: SAME bytes (nothing written between the boundaries)
-  // — must still produce a distinct commit, not dedup.
+  // turn N+1 USER snapshot: SAME bytes (nothing written between the
+  // boundaries) and no workspace change — the checkpoint gate skips it.
   const user = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-start', seq: 21 })
   assert.equal(user.ok, true)
-  assert.equal(user.unchanged, undefined)
-  assert.ok(user.commit)
-  assert.notEqual(user.commit, asst.commit)
-  assert.equal(user.base, asst.commit) // chained onto the ASST node
+  assert.equal(user.unchanged, true)
+  assert.equal(user.commit, undefined)
+  assert.equal(user.base, asst.commit) // still chained onto the ASST node
 
   await rm(root, { recursive: true, force: true })
 })
@@ -417,7 +424,9 @@ test('timeline parse: road fork shape', async () => {
   }
   await rewindSession(subprocess, historyRoot, sessions, persistence, agents, sessionId, a.commit!, false)
   await writeFile(official, Buffer.from('AAAX'))
-  const fork = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-start', seq: 6 })
+  // turn-end: the checkpoint gate skips turn-start pins on an unchanged
+  // workspace; the changed session still forks from A on the turn-end.
+  const fork = await takeSnapshot(subprocess, historyRoot, undefined, persistence, { session, kind: 'turn-end', seq: 6 })
   assert.equal(fork.fork, true)
 
   const rows = await timelineRows(subprocess, repoDir, sessionId, root)

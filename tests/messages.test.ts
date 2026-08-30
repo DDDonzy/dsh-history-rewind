@@ -67,6 +67,19 @@ test('session message: manual + rewind', () => {
   assert.deepEqual(parseMessage(rewind), { kind: 'rewind', target: 'deadbeef' })
 })
 
+test('session message: Context Curation stores baseline + masked TURN ids and keeps legacy formats', () => {
+  const message = buildSessionMessage({ kind: 'refine', turn: 5, maskedTurns: [3, 1, 2, 2], ws: 'curated-ws' })
+  assert.equal(message, '[CURATE][BASE:5][TURNS:1,2,3][curated-ws]')
+  assert.deepEqual(parseMessage(message), {
+    kind: 'refine', turn: 5, maskedTurns: [1, 2, 3], ws: 'curated-ws',
+  })
+  assert.equal(buildWorkspaceMessage({ kind: 'refine', maskedTurns: [1, 2, 3] }), '[CURATE]')
+  assert.deepEqual(parseMessage('[CURATE][TURNS:1,2][old-curate-ws]'), {
+    kind: 'refine', maskedTurns: [1, 2], ws: 'old-curate-ws',
+  })
+  assert.deepEqual(parseMessage('[REFINE][legacy-ws]'), { kind: 'refine', ws: 'legacy-ws' })
+})
+
 test('workspace message: turn-end uses ASST preview, NO ws bracket', () => {
   const message = buildWorkspaceMessage({
     kind: 'turn-end', turn: 4, phase: 'end', seq: 7, session: 's2', asstMessage: 'ok', ws: 'y',
@@ -167,6 +180,18 @@ test('deriveTurn: after a CHECK POINT (turn-start) the same turn is still open',
   const subjects = ['[TURN 0005][CHECK POINT][bbbb]', '[TURN 0004][USER] a[ASST] b[aaaa]']
   assert.equal(deriveTurn(subjects, 'start'), 6)
   assert.equal(deriveTurn(subjects, 'end'), 5)
+})
+
+test('deriveTurn: independent curation baseline continues local TURN numbering', () => {
+  const subjects = ['[CURATE][BASE:5][TURNS:2,3]']
+  assert.equal(deriveTurn(subjects, 'start'), 6)
+  assert.equal(deriveTurn(subjects, 'end'), 6)
+})
+
+test('deriveTurn: empty independent curation baseline starts at TURN 1', () => {
+  const subjects = ['[CURATE][BASE:0][TURNS:1,2]']
+  assert.equal(deriveTurn(subjects, 'start'), 1)
+  assert.equal(deriveTurn(subjects, 'end'), 1)
 })
 
 test('deriveTurn: manual and rewind lines are skipped (new format)', () => {

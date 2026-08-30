@@ -34,7 +34,7 @@
 import { Buffer } from 'node:buffer'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 
-export type SnapKind = 'turn-start' | 'turn-end' | 'manual' | 'rewind'
+export type SnapKind = 'turn-start' | 'turn-end' | 'manual' | 'rewind' | 'refine'
 
 export type WorkspaceChangeStatus = 'A' | 'M' | 'D'
 
@@ -47,7 +47,7 @@ export interface WorkspaceChange {
 /** Parsed commit-message payload (only leaf scalars; owned JSON). */
 export interface SnapMeta {
   kind: SnapKind
-  /** TURN number for turn snapshots (undefined for manual/rewind). */
+  /** TURN number for turn snapshots, or the last retained TURN at a curation root. */
   turn?: number
   /** Phase for turn snapshots: 'start' | 'end'. */
   phase?: 'start' | 'end'
@@ -72,6 +72,8 @@ export interface SnapMeta {
   userMessage?: string
   /** Assistant message preview that closed this turn (turn-end only). */
   asstMessage?: string
+  /** TURN ids removed by a context-curation snapshot. */
+  maskedTurns?: number[]
   /** Workspace A/M/D manifest captured with this snapshot. */
   changes?: WorkspaceChange[]
 }
@@ -182,6 +184,18 @@ function splitFileChanges(subject: string): { subject: string; changes?: Workspa
  */
 export function buildSessionMessage(meta: SnapMeta): string {
   if (meta.kind === 'rewind') return `[REWIND → ${meta.target ?? ''}]`
+  if (meta.kind === 'refine') {
+    const turns = (meta.maskedTurns ?? [])
+      .filter((turn) => Number.isSafeInteger(turn) && turn >= 0)
+      .filter((turn, index, values) => values.indexOf(turn) === index)
+      .sort((a, b) => a - b)
+    const baseMarker = meta.turn !== undefined && Number.isSafeInteger(meta.turn) && meta.turn >= 0
+      ? `[BASE:${meta.turn}]`
+      : ''
+    const turnMarker = turns.length > 0 ? `[TURNS:${turns.join(',')}]` : ''
+    const wsMarker = meta.ws !== undefined && meta.ws.length > 0 ? `[${meta.ws}]` : ''
+    return `[CURATE]${baseMarker}${turnMarker}${wsMarker}`
+  }
   const ws = meta.ws !== undefined && meta.ws.length > 0 ? meta.ws : ''
   const head = `[${turnField(meta.turn)}]`
   let subject: string
@@ -198,6 +212,7 @@ export function buildSessionMessage(meta: SnapMeta): string {
  * @returns the commit subject.
  */
 export function buildWorkspaceMessage(meta: SnapMeta): string {
+  if (meta.kind === 'refine') return '[CURATE]'
   const head = `[${turnField(meta.turn)}]`
   if (meta.kind === 'manual') return `${head}[MANUAL]`
   if (meta.kind === 'turn-start') return `${head}[CHECK POINT]`
@@ -229,6 +244,30 @@ function parseBracket(line: string): SnapMeta | null {
       kind: 'manual',
       turn: Number(manual[1]),
       ...(manual[2] !== undefined && manual[2].length > 0 ? { ws: manual[2] } : {}),
+    }
+  }
+
+  // [CURATE][BASE:5][TURNS:1,2,3][ws?] — independent Session baseline.
+  const curate = /^\[CURATE\](?:\[BASE:([0-9]+)\])?(?:\[TURNS:([0-9]+(?:,[0-9]+)*)\])?(?:\[([^\]]*)\])?$/.exec(line)
+  if (curate !== null) {
+    const maskedTurns = curate[2] === undefined
+      ? []
+      : curate[2].split(',').map(Number).filter((turn) => Number.isSafeInteger(turn) && turn >= 0)
+    const baseTurn = curate[1] === undefined ? undefined : Number(curate[1])
+    return {
+      kind: 'refine',
+      ...(baseTurn !== undefined && Number.isSafeInteger(baseTurn) ? { turn: baseTurn } : {}),
+      ...(maskedTurns.length > 0 ? { maskedTurns } : {}),
+      ...(curate[3] !== undefined && curate[3].length > 0 ? { ws: curate[3] } : {}),
+    }
+  }
+
+  // [REFINE][ws?] — legacy pre-Context-Curation snapshot.
+  const refine = /^\[REFINE\](?:\[([^\]]*)\])?$/.exec(line)
+  if (refine !== null) {
+    return {
+      kind: 'refine',
+      ...(refine[1] !== undefined && refine[1].length > 0 ? { ws: refine[1] } : {}),
     }
   }
 

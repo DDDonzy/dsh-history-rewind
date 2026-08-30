@@ -56,9 +56,15 @@ export interface PersistenceLike {
 /** One turn-boundary snapshot request. */
 export interface SnapshotRequest {
   session: SessionLike
-  kind: 'turn-start' | 'turn-end' | 'manual'
+  kind: 'turn-start' | 'turn-end' | 'manual' | 'refine'
   /** Event seq (turn snapshots only). */
   seq?: number
+  /** TURN ids removed by a context-curation snapshot. */
+  maskedTurns?: number[]
+  /** Last local TURN in an independent Context Curation Session baseline. */
+  baselineTurn?: number
+  /** Skip the workspace phase (used for read-only derived-session bootstrap). */
+  skipWorkspace?: boolean
   /**
    * Event-time capture promise (listener supplies it). When absent the
    * snapshot captures at the start of the task — acceptable for manual
@@ -95,7 +101,7 @@ export async function captureSessionArtifact(
   sessions: { flush?(session: SessionLike): Promise<boolean> } | undefined,
   persistence: PersistenceLike | undefined,
   session: SessionLike,
-  kind: 'turn-start' | 'turn-end' | 'manual' = 'turn-end',
+  kind: 'turn-start' | 'turn-end' | 'manual' | 'refine' = 'turn-end',
   /** Seq of the `turn/end` event this capture serves, when known. Identifies the
    *  turn the previews must come from instead of inferring it from the tail. */
   endSeq?: number,
@@ -310,7 +316,9 @@ export async function takeSnapshot(
   const kind = request.kind
   const seq = request.seq
   const derived = deriveTurn(subjects, kind === 'turn-start' ? 'start' : 'end')
-  const snap = kind === 'manual' ? `manual-${Date.now()}` : `turn-${derived}-${kind === 'turn-start' ? 'start' : 'end'}-${seq ?? 0}`
+  const snap = kind === 'manual' ? `manual-${Date.now()}`
+    : kind === 'refine' ? `refine-${Date.now()}`
+    : `turn-${derived}-${kind === 'turn-start' ? 'start' : 'end'}-${seq ?? 0}`
   // turn-start is a CHECK POINT (pre-send state, no conversation preview).
   // turn-end carries BOTH this turn's user message and the assistant reply.
   const meta: SnapMeta = {
@@ -320,6 +328,12 @@ export async function takeSnapshot(
       : {}),
     session: sessionId,
     snap,
+    ...(kind === 'refine' && request.baselineTurn !== undefined
+      ? { turn: request.baselineTurn }
+      : {}),
+    ...(kind === 'refine' && request.maskedTurns !== undefined
+      ? { maskedTurns: request.maskedTurns.slice().sort((a, b) => a - b) }
+      : {}),
     ...(kind === 'turn-end' && captured.userPreview !== undefined && captured.userPreview.length > 0
       ? { userMessage: captured.userPreview }
       : {}),
@@ -363,7 +377,7 @@ export async function takeSnapshot(
   const baseBlobPromise = base !== undefined
     ? runGit(subprocess, ['git', `--git-dir=${sessionRepo.gitDir}`, 'rev-parse', '--verify', '--quiet', `${base}:session-${sessionId}/session.jsonl.zstd`], root, env)
     : Promise.resolve(null)
-  const wsPromise = cwd !== undefined && cwd.length > 0
+  const wsPromise = request.skipWorkspace !== true && cwd !== undefined && cwd.length > 0
     ? snapshotWorkspace(subprocess, root, sessionId, cwd, buildWorkspaceMessage(meta))
     : Promise.resolve({ ok: true } as WorkspaceSnapshotResult)
 
@@ -446,8 +460,8 @@ export async function takeSnapshot(
   const commit = firstLine(committed.stdout)
   if (commit.length === 0) return { ok: false, reason: 'commit-empty' }
 
-  // 6. Pin: jump-target base => NEW road (main stays untouched, per spec);
-  //    road/main base => advance that ref.
+  // 6. Pin: jump-target base => NEW road (main untouched); ordinary
+  //    road/main base => advance the active ref.
   let targetRef: string
   let fork = false
   if (fromJump) {

@@ -1,12 +1,17 @@
 /**
  * Git-graph layout: lane assignment for fork-only histories.
  *
- * Commits are processed in topo order (oldest first); a child takes its
- * single parent's lane unless that lane is already taken by an earlier child
- * of the same parent, which is exactly the fork case: after a rewind the
- * second road opens a new lane. When the caller knows the HEAD commit (main
- * tip), the road that reaches the HEAD keeps the parent's lane and fork
- * roads move right — the current road stays visually dominant.
+ * Each disconnected Git root owns an exclusive horizontal COMPONENT BLOCK.
+ * Components are grouped vertically by root creation time, while their lane
+ * blocks never overlap: a root and every descendant may use only lanes inside
+ * that component's contiguous range. The active component is placed leftmost;
+ * every other root receives the next whole block to the right.
+ *
+ * Within one component, commits are processed as a fork-only tree using local
+ * lane ids starting at 0. At every fork the child on the current HEAD road
+ * keeps the parent's local lane; every other direct child reserves a new local
+ * lane before any child subtree is visited. Reserving siblings first prevents
+ * nested forks from colliding inside the same block.
  *
  * Since this design has fork and never merge, %P always holds exactly one
  * parent (roots have none).
@@ -47,34 +52,141 @@ export function roadSet(rows: TimelineRow[], headSha: string | null): Set<string
  * @returns row + lane layout, oldest first.
  */
 export function layoutGraph(rows: TimelineRow[], headSha: string | null = null): Layouter {
-  const order = rows.slice().reverse() // oldest first (log is newest-first)
-  const shaToRow = new Map<string, TimelineRow>()
-  for (const row of order) shaToRow.set(row.sha, row)
-  const mainRoad = roadSet(rows, headSha)
-  const lane = new Map<string, number>()
-  const process = (row: TimelineRow): void => {
-    if (lane.has(row.sha)) return
-    if (row.parents.length === 0) {
-      lane.set(row.sha, 0)
-      return
-    }
-    const parent = row.parents[0]!
-    process(shaToRow.get(parent)!)
-    const parentLane = lane.get(parent)!
-    const siblings = order.filter((r) => r.parents.includes(parent))
-    // Sort so the current-road child (if any) keeps the parent lane; other
-    // forks are ordered by their topo position.
-    const sorted = siblings.slice().sort((a, b) => {
-      const aMain = mainRoad.has(a.sha) ? 0 : 1
-      const bMain = mainRoad.has(b.sha) ? 0 : 1
-      if (aMain !== bMain) return aMain - bMain
-      return order.indexOf(a) - order.indexOf(b)
-    })
-    lane.set(row.sha, parentLane + Math.max(0, sorted.findIndex((r) => r.sha === row.sha)))
+  const topoOrder = rows.slice().reverse() // oldest first (log is newest-first)
+  if (topoOrder.length === 0) return { rows: [], lanes: 1 }
+
+  const bySha = new Map<string, TimelineRow>()
+  const topoIndex = new Map<string, number>()
+  for (let index = 0; index < topoOrder.length; index += 1) {
+    const row = topoOrder[index]!
+    bySha.set(row.sha, row)
+    topoIndex.set(row.sha, index)
   }
-  for (const row of order) process(row)
-  const lanes = Math.max(0, ...order.map((row) => lane.get(row.sha) ?? 0)) + 1
-  return { rows: order.map((row) => ({ ...row, lane: lane.get(row.sha) ?? 0 })), lanes }
+  const mainRoad = roadSet(rows, headSha)
+
+  // Resolve the disconnected root that owns every commit. Grouping rows by
+  // root guarantees that lane reuse cannot overlap vertically even if a future
+  // Git version interleaves disconnected components in --topo-order output.
+  const rootMemo = new Map<string, string>()
+  const rootOf = (start: TimelineRow): string => {
+    const cached = rootMemo.get(start.sha)
+    if (cached !== undefined) return cached
+    const path: string[] = []
+    const seen = new Set<string>()
+    let current = start
+    let rootSha = current.sha
+    for (;;) {
+      const known = rootMemo.get(current.sha)
+      if (known !== undefined) { rootSha = known; break }
+      if (seen.has(current.sha)) { rootSha = current.sha; break }
+      seen.add(current.sha)
+      path.push(current.sha)
+      const parentSha = current.parents[0]
+      const parent = parentSha === undefined ? undefined : bySha.get(parentSha)
+      if (parent === undefined) { rootSha = current.sha; break }
+      current = parent
+    }
+    for (const sha of path) rootMemo.set(sha, rootSha)
+    return rootSha
+  }
+
+  const componentRows = new Map<string, TimelineRow[]>()
+  for (const row of topoOrder) {
+    const rootSha = rootOf(row)
+    const component = componentRows.get(rootSha)
+    if (component === undefined) componentRows.set(rootSha, [row])
+    else component.push(row)
+  }
+  // Independent histories read top-to-bottom by baseline creation time. A
+  // component stays contiguous even when one of its later children was created
+  // after a newer curation root.
+  const roots = Array.from(componentRows.keys())
+    .map((sha) => bySha.get(sha)!)
+    .sort((a, b) => {
+      const byTime = a.ct - b.ct
+      if (byTime !== 0) return byTime
+      return (topoIndex.get(a.sha) ?? 0) - (topoIndex.get(b.sha) ?? 0)
+    })
+  const order = roots.flatMap((root) => componentRows.get(root.sha) ?? [])
+  const orderIndex = new Map<string, number>()
+  for (let index = 0; index < order.length; index += 1) orderIndex.set(order[index]!.sha, index)
+
+  const childrenOf = new Map<string, TimelineRow[]>()
+  for (const row of order) {
+    const parent = row.parents[0]
+    if (parent === undefined || !bySha.has(parent)) continue
+    const children = childrenOf.get(parent)
+    if (children === undefined) childrenOf.set(parent, [row])
+    else children.push(row)
+  }
+
+  /** Current-road child first; otherwise preserve component topo order. */
+  const roadOrder = (a: TimelineRow, b: TimelineRow): number => {
+    const aMain = mainRoad.has(a.sha) ? 0 : 1
+    const bMain = mainRoad.has(b.sha) ? 0 : 1
+    if (aMain !== bMain) return aMain - bMain
+    return (orderIndex.get(a.sha) ?? 0) - (orderIndex.get(b.sha) ?? 0)
+  }
+
+  // First solve every component in LOCAL lane coordinates (root = local 0).
+  const localLane = new Map<string, number>()
+  const componentWidth = new Map<string, number>()
+  for (const root of roots) {
+    localLane.set(root.sha, 0)
+    let nextLane = 1
+    // Breadth-first traversal reserves every direct sibling lane before a
+    // nested fork can request another lane inside THIS component.
+    const queue = [root]
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const parent = queue[cursor]!
+      const children = (childrenOf.get(parent.sha) ?? []).slice().sort(roadOrder)
+      if (children.length === 0) continue
+      const parentLane = localLane.get(parent.sha) ?? 0
+      localLane.set(children[0]!.sha, parentLane)
+      for (let index = 1; index < children.length; index += 1) {
+        localLane.set(children[index]!.sha, nextLane)
+        nextLane += 1
+      }
+      queue.push(...children)
+    }
+    componentWidth.set(root.sha, Math.max(1, nextLane))
+  }
+
+  // Defensive fallback for malformed cyclic input. Real Git DAGs always reach
+  // every row from one of the roots above.
+  for (const row of order) {
+    if (localLane.has(row.sha)) continue
+    const rootSha = rootOf(row)
+    const nextLane = componentWidth.get(rootSha) ?? 1
+    localLane.set(row.sha, nextLane)
+    componentWidth.set(rootSha, nextLane + 1)
+  }
+
+  // Give each root an EXCLUSIVE contiguous horizontal block. Keep the active
+  // component leftmost, then place the remaining roots in vertical/creation
+  // order to the right. Children can never enter another root's lane range.
+  const verticalRootIndex = new Map(roots.map((root, index) => [root.sha, index]))
+  const horizontalRoots = roots.slice().sort((a, b) => {
+    const aActive = mainRoad.has(a.sha) ? 0 : 1
+    const bActive = mainRoad.has(b.sha) ? 0 : 1
+    if (aActive !== bActive) return aActive - bActive
+    return (verticalRootIndex.get(a.sha) ?? 0) - (verticalRootIndex.get(b.sha) ?? 0)
+  })
+  const componentOffset = new Map<string, number>()
+  let totalLanes = 0
+  for (const root of horizontalRoots) {
+    componentOffset.set(root.sha, totalLanes)
+    totalLanes += componentWidth.get(root.sha) ?? 1
+  }
+
+  return {
+    rows: order.map((row) => {
+      const rootSha = rootOf(row)
+      const lane = (componentOffset.get(rootSha) ?? 0) + (localLane.get(row.sha) ?? 0)
+      return { ...row, lane }
+    }),
+    lanes: Math.max(1, totalLanes),
+  }
 }
 
 /**
@@ -118,11 +230,9 @@ export interface GraphRow extends TimelineRow {
 export interface Graph {
   rows: GraphRow[]
   lanes: number
-  /** Lane indices occupied by the current (HEAD) road. Rails belonging to
-   *  these lanes keep their color; every other lane is an abandoned/fork road
-   *  and renders grey. Lane-level, not row-level: a rail spans many rows, so
-   *  its color must be decided by which road it belongs to, not by the row it
-   *  happens to cross. */
+  /** Global lane ids touched by the current road. Kept for layout diagnostics;
+   *  rendering still uses `GraphRow.isHeadRoad` / commit ancestry so color is
+   *  never inferred from geometry alone. */
   headLanes: number[]
 }
 
@@ -210,10 +320,8 @@ export function buildGraph(rows: TimelineRow[], headSha: string | null = null): 
       isHeadRoad: headRoad.has(entry.row.sha),
     }))
 
-  // Lanes occupied by HEAD-road commits. A rail (identified by its `lane`)
-  // keeps its color iff this lane is one of them; abandoned fork lanes render
-  // grey end-to-end, and the main rail keeps its color even while crossing
-  // rows that belong to the abandoned road.
+  // Global lane ids touched by the current road (diagnostic only; UI coloring
+  // remains ancestry-based rather than assuming geometry implies ownership).
   const headLanes: number[] = []
   for (const row of out) {
     if (row.isHeadRoad && !headLanes.includes(row.lane)) headLanes.push(row.lane)

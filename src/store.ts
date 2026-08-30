@@ -191,26 +191,24 @@ export async function acquireLock(root: string, key: string, waitMs = 8000): Pro
  * missing `.gitignore` excludes nothing (besides the `.git` directory, which
  * `walkFiles` always skips regardless of any exclude list).
  *
- * A line starting with `!` (gitignore negation) is dropped rather than
- * mis-parsed: `compileExcludes` has no negation semantics, so treating `!foo`
- * as a literal pattern would exclude a file this project actually wants
- * tracked. Dropping it just means that one line has no effect, which is the
- * safe direction to fail in (a snapshot that includes one extra file is
- * recoverable; one that silently drops a wanted file is not).
+ * Lines stay in source order because Git rules are ordered and later `!`
+ * negations can re-include an earlier match. Leading/trailing whitespace is
+ * also preserved for Git-compatible escaping; only empty lines and literal
+ * comment lines are omitted before compilation.
  * @param cwd - the workspace root whose `.gitignore` to read.
- * @returns exclude basename/glob patterns (empty when there is no `.gitignore`).
+ * @returns raw ordered ignore rules (empty when there is no `.gitignore`).
  */
 export async function readExcludes(cwd: string): Promise<string[]> {
   let text: string
   try {
     text = await readFile(join(cwd, '.gitignore'), 'utf-8')
-  } catch {
-    return []
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
   }
   return text
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith('#') && !line.startsWith('!'))
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
 }
 
 /**

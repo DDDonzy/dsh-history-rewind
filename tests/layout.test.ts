@@ -4,11 +4,11 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { layoutGraph, buildGraph } from '../src/client/layout.ts'
+import { layoutGraph, buildGraph, roadSet } from '../src/client/layout.ts'
 import type { TimelineRow } from '../src/client/api.ts'
 
-function row(sha: string, parents: string[]): TimelineRow {
-  return { sha, parents, subject: 'dsh-history: turn 1 start (seq 1) session-s snap=x', ct: 1, meta: null }
+function row(sha: string, parents: string[], ct = 1): TimelineRow {
+  return { sha, parents, subject: 'dsh-history: turn 1 start (seq 1) session-s snap=x', ct, meta: null }
 }
 
 test('linear history keeps a single lane', () => {
@@ -61,6 +61,135 @@ test('without HEAD the first-listed road keeps lane 0', () => {
   assert.equal(lanes.get('B'), 0)
   assert.equal(lanes.get('M'), 1)
   assert.equal(lanes.get('D'), 1)
+})
+
+test('nested fork reserves a lane after every direct sibling (real collision regression)', () => {
+  // Real failing shape from session-f45e...:
+  //
+  //                  ┌ 0817782 (main ref)
+  // R -> A ──────────┼ 96b7342 ─┬ b8e1caa
+  //                  │          └ a97b038
+  //                  ├ fde9b72
+  //                  └ fad8ecf -> b9956c1 (active tip)
+  //
+  // A's four children reserve lanes 0..3 first. The nested fork below
+  // 96b7342 (lane 2) must therefore open lane 4, not parentLane+1 (= lane 3,
+  // already owned by fde9b72).
+  const rows = [
+    row('b9956c1', ['fad8ecf']),
+    row('fad8ecf', ['eeedebc']),
+    row('a97b038', ['96b7342']),
+    row('fde9b72', ['eeedebc']),
+    row('b8e1caa', ['96b7342']),
+    row('96b7342', ['eeedebc']),
+    row('0817782', ['eeedebc']),
+    row('eeedebc', ['02ddd4d']),
+    row('02ddd4d', []),
+  ]
+  const layout = layoutGraph(rows, 'b9956c1')
+  assert.equal(layout.lanes, 5)
+  const lanes = new Map(layout.rows.map((r) => [r.sha, r.lane]))
+  assert.equal(lanes.get('02ddd4d'), 0)
+  assert.equal(lanes.get('eeedebc'), 0)
+  assert.equal(lanes.get('fad8ecf'), 0, 'active road keeps the parent lane')
+  assert.equal(lanes.get('b9956c1'), 0)
+  assert.equal(lanes.get('0817782'), 1)
+  assert.equal(lanes.get('96b7342'), 2)
+  assert.equal(lanes.get('b8e1caa'), 2, 'first nested child continues straight')
+  assert.equal(lanes.get('fde9b72'), 3)
+  assert.equal(lanes.get('a97b038'), 4, 'nested fork receives the next globally free lane')
+  assert.notEqual(lanes.get('a97b038'), lanes.get('fde9b72'))
+
+  // Every tip owns a distinct lane while its road is visible.
+  const tipLanes = ['b9956c1', '0817782', 'b8e1caa', 'a97b038', 'fde9b72']
+    .map((sha) => lanes.get(sha))
+  assert.equal(new Set(tipLanes).size, tipLanes.length)
+
+  const graph = buildGraph(rows, 'b9956c1')
+  assert.deepEqual(graph.headLanes, [0])
+  const byId = new Map(graph.rows.map((r) => [r.sha, r]))
+  assert.ok(
+    byId.get('96b7342')!.bottomEdges.some((edge) =>
+      edge.childSha === 'a97b038' && edge.from === 2 && edge.to === 4),
+    'nested fork rail leaves lane 2 and bends into globally reserved lane 4',
+  )
+
+  // Context Curation selection mode filters to the active tip's ancestor road.
+  const currentRoad = roadSet(rows, 'b9956c1')
+  const currentRows = rows.filter((candidate) => currentRoad.has(candidate.sha))
+  assert.deepEqual(
+    currentRows.map((candidate) => candidate.sha),
+    ['b9956c1', 'fad8ecf', 'eeedebc', '02ddd4d'],
+  )
+  const selectionGraph = buildGraph(currentRows, 'b9956c1')
+  assert.equal(selectionGraph.lanes, 1, 'selection-mode graph draws only one current-road lane')
+  assert.deepEqual(selectionGraph.rows.map((candidate) => candidate.lane), [0, 0, 0, 0])
+})
+
+test('parentless curation road stays disconnected from the original root', () => {
+  // Original history A -> B and independent curated baseline O -> C.
+  const rows = [row('C', ['O']), row('O', []), row('B', ['A']), row('A', [])]
+  const graph = buildGraph(rows, 'C')
+  assert.equal(graph.lanes, 2, 'each root owns an exclusive one-lane block')
+  const byId = new Map(graph.rows.map((candidate) => [candidate.sha, candidate]))
+  assert.equal(byId.get('O')!.lane, 0, 'active curation root owns the left block')
+  assert.equal(byId.get('C')!.lane, 0)
+  assert.equal(byId.get('A')!.lane, 1, 'original root owns a separate right block')
+  assert.equal(byId.get('B')!.lane, 1)
+  assert.deepEqual(byId.get('O')!.topEdges, [], 'curation root has no parent rail')
+  assert.deepEqual(byId.get('A')!.topEdges, [], 'original root has no parent rail')
+  assert.ok(!graph.rows.flatMap((candidate) => [...candidate.topEdges, ...candidate.bottomEdges])
+    .some((edge) => (edge.childSha === 'O' && edge.parentSha === 'B')
+      || (edge.childSha === 'B' && edge.parentSha === 'O')))
+  assert.deepEqual(graph.headLanes, [0])
+})
+
+test('multiple curation roots own exclusive horizontal blocks and remain vertically grouped', () => {
+  // Real screenshot topology (newest first). 50fb was created after the second
+  // root, but belongs to c011's component and must remain grouped with it.
+  const rows = [
+    row('525e3e1', ['c278f7d'], 4580),
+    row('0197f3c', ['a7a69c8'], 4559),
+    row('a7a69c8', ['c278f7d'], 4470),
+    row('c278f7d', [], 4451),
+    row('50fb0c4', ['c011bd4'], 4531),
+    row('fc46750', ['c011bd4'], 4409),
+    row('c011bd4', [], 4370),
+    row('95251d3', ['9aee56b'], 4275),
+    row('9aee56b', [], 3018),
+  ]
+  const graph = buildGraph(rows, '525e3e1')
+  assert.equal(graph.lanes, 5, 'component widths 2 + 1 + 2 occupy disjoint lane blocks')
+  assert.deepEqual(
+    graph.rows.map((candidate) => candidate.sha),
+    ['9aee56b', '95251d3', 'c011bd4', 'fc46750', '50fb0c4', 'c278f7d', 'a7a69c8', '0197f3c', '525e3e1'],
+    'components stay contiguous and are ordered by root creation time',
+  )
+  const byId = new Map(graph.rows.map((candidate) => [candidate.sha, candidate]))
+  // Active c278 component is the left block [0,1].
+  assert.equal(byId.get('c278f7d')!.lane, 0)
+  assert.equal(byId.get('525e3e1')!.lane, 0)
+  assert.equal(byId.get('a7a69c8')!.lane, 1)
+  assert.equal(byId.get('0197f3c')!.lane, 1)
+  // Original linear history owns middle block [2].
+  assert.equal(byId.get('9aee56b')!.lane, 2)
+  assert.equal(byId.get('95251d3')!.lane, 2)
+  // Earlier c011 component owns right block [3,4].
+  assert.equal(byId.get('c011bd4')!.lane, 3)
+  assert.equal(byId.get('fc46750')!.lane, 3)
+  assert.equal(byId.get('50fb0c4')!.lane, 4)
+  const ranges = [new Set([0, 1]), new Set([2]), new Set([3, 4])]
+  for (let left = 0; left < ranges.length; left += 1) {
+    for (let right = left + 1; right < ranges.length; right += 1) {
+      assert.ok([...ranges[left]!].every((lane) => !ranges[right]!.has(lane)))
+    }
+  }
+  // Styling is ancestry-based; only the active component is the HEAD road.
+  assert.equal(byId.get('9aee56b')!.isHeadRoad, false)
+  assert.equal(byId.get('c011bd4')!.isHeadRoad, false)
+  assert.equal(byId.get('c278f7d')!.isHeadRoad, true)
+  assert.equal(byId.get('525e3e1')!.isHeadRoad, true)
+  assert.deepEqual(graph.headLanes, [0])
 })
 
 test('empty / single-row histories', () => {
